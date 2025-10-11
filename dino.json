@@ -1,0 +1,14 @@
+{
+  "name": "deno-youtube-instagram-api",
+  "version": "1.0.0",
+  "description": "Lightweight Deno API for YouTube audio extraction and Instagram CDN fetcher",
+  "entry": "main.ts",
+  "permissions": [
+    "net"
+  ],
+  "deploy": {
+    "project": "deno-youtube-instagram",
+    "include": ["main.ts"],
+    "exclude": ["README.md", ".git", "node_modules"]
+  }
+}
