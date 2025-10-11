@@ -1,18 +1,12 @@
-// 🦕 Google Search → JSON API for Deno Deploy
-// Example: https://yourapp.deno.dev/gsearch?q=hindi+funny
-
 Deno.serve(async (req) => {
   const { pathname, searchParams } = new URL(req.url);
 
-  // Root message
   if (pathname === "/") {
-    return new Response(
-      "🦕 Google JSON Search API Running!\nUse /gsearch?q=your+query",
-      { headers: { "content-type": "text/plain" } }
-    );
+    return new Response("🦕 Google JSON Search API — use /gsearch?q=your+query", {
+      headers: { "content-type": "text/plain" },
+    });
   }
 
-  // Main Google Search endpoint
   if (pathname === "/gsearch") {
     const query = searchParams.get("q");
     if (!query) return error("Missing ?q=");
@@ -29,7 +23,7 @@ Deno.serve(async (req) => {
 
       const html = await res.text();
 
-      // ✅ Extract search result blocks (title, link, snippet)
+      // ✅ Match each result block — more flexible regex
       const regex = /<a href="\/url\?q=(https[^"&]+)[^>]*"><h3[^>]*>(.*?)<\/h3>/gs;
       const results: any[] = [];
       let match;
@@ -38,7 +32,7 @@ Deno.serve(async (req) => {
         const link = decodeURIComponent(match[1]);
         const title = decodeHtml(stripHtml(match[2]));
 
-        // Extract snippet (description text below the title)
+        // Snippet text (try to match next div)
         const after = html.slice(match.index + match[0].length, match.index + 500);
         const snippetMatch = after.match(/<div class="[^"]*?VwiC3b[^"]*?".*?>(.*?)<\/div>/s);
         const snippet = snippetMatch ? decodeHtml(stripHtml(snippetMatch[1])) : "";
@@ -50,19 +44,17 @@ Deno.serve(async (req) => {
         status: "success",
         query,
         count: results.length,
-        results: results.slice(0, 10), // limit top 10
+        results: results.slice(0, 10),
       });
     } catch (err) {
       return error(err.message);
     }
   }
 
-  // Not found handler
   return new Response("404 Not Found", { status: 404 });
 });
 
-// ----------------- Helper Functions -----------------
-
+// Helpers
 function json(obj: any) {
   return new Response(JSON.stringify(obj, null, 2), {
     headers: { "content-type": "application/json" },
