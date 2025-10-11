@@ -1,50 +1,68 @@
+// 🦕 DuckDuckGo JSON Search API Wrapper
+// Example: https://yourapp.deno.dev/search?q=hindi+funny
+
 Deno.serve(async (req) => {
   const { pathname, searchParams } = new URL(req.url);
 
+  // Root info
   if (pathname === "/") {
-    return new Response("🦕 Google JSON Search API — use /gsearch?q=your+query", {
-      headers: { "content-type": "text/plain" },
-    });
+    return new Response(
+      "🦕 DuckDuckGo JSON Search API\nUse /search?q=your+query",
+      { headers: { "content-type": "text/plain" } }
+    );
   }
 
-  if (pathname === "/gsearch") {
+  // Search endpoint
+  if (pathname === "/search") {
     const query = searchParams.get("q");
     if (!query) return error("Missing ?q=");
 
     try {
-      const searchUrl = `https://www.google.com/search?q=${encodeURIComponent(query)}&hl=en&num=20`;
-      const res = await fetch(searchUrl, {
-        headers: {
-          "User-Agent":
-            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/127.0.0.1 Safari/537.36",
-          "Accept-Language": "en-US,en;q=0.9",
-        },
-      });
+      // Fetch JSON from DuckDuckGo Instant Answer API
+      const url = `https://api.duckduckgo.com/?q=${encodeURIComponent(query)}&format=json&no_html=1&skip_disambig=1`;
+      const res = await fetch(url);
+      const data = await res.json();
 
-      const html = await res.text();
+      // Extract relevant results
+      const results: Array<{ title: string; link: string; snippet: string }> = [];
 
-      // ✅ Match each result block — more flexible regex
-      const regex = /<a href="\/url\?q=(https[^"&]+)[^>]*"><h3[^>]*>(.*?)<\/h3>/gs;
-      const results: any[] = [];
-      let match;
+      // 1️⃣ RelatedTopics (main search results)
+      if (data.RelatedTopics?.length) {
+        for (const item of data.RelatedTopics) {
+          if (item.Text && item.FirstURL) {
+            results.push({
+              title: item.Text,
+              link: item.FirstURL,
+              snippet: item.Text,
+            });
+          } else if (item.Topics) {
+            for (const sub of item.Topics) {
+              if (sub.Text && sub.FirstURL) {
+                results.push({
+                  title: sub.Text,
+                  link: sub.FirstURL,
+                  snippet: sub.Text,
+                });
+              }
+            }
+          }
+        }
+      }
 
-      while ((match = regex.exec(html)) !== null) {
-        const link = decodeURIComponent(match[1]);
-        const title = decodeHtml(stripHtml(match[2]));
-
-        // Snippet text (try to match next div)
-        const after = html.slice(match.index + match[0].length, match.index + 500);
-        const snippetMatch = after.match(/<div class="[^"]*?VwiC3b[^"]*?".*?>(.*?)<\/div>/s);
-        const snippet = snippetMatch ? decodeHtml(stripHtml(snippetMatch[1])) : "";
-
-        results.push({ title, link, snippet });
+      // 2️⃣ AbstractResult (if exists)
+      if (data.AbstractText && data.AbstractURL) {
+        results.unshift({
+          title: data.Heading || "Abstract",
+          link: data.AbstractURL,
+          snippet: data.AbstractText,
+        });
       }
 
       return json({
         status: "success",
         query,
         count: results.length,
-        results: results.slice(0, 10),
+        results: results.slice(0, 10), // top 10 results
       });
     } catch (err) {
       return error(err.message);
@@ -54,7 +72,8 @@ Deno.serve(async (req) => {
   return new Response("404 Not Found", { status: 404 });
 });
 
-// Helpers
+// ---------------- Helper Functions ----------------
+
 function json(obj: any) {
   return new Response(JSON.stringify(obj, null, 2), {
     headers: { "content-type": "application/json" },
@@ -63,17 +82,4 @@ function json(obj: any) {
 
 function error(message: string) {
   return json({ status: "error", message });
-}
-
-function stripHtml(str: string) {
-  return str.replace(/<[^>]*>/g, "");
-}
-
-function decodeHtml(str: string) {
-  return str
-    .replace(/&amp;/g, "&")
-    .replace(/&lt;/g, "<")
-    .replace(/&gt;/g, ">")
-    .replace(/&quot;/g, '"')
-    .replace(/&#39;/g, "'");
 }
