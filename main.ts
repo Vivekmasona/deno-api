@@ -1,26 +1,24 @@
-// Deno YouTube Extractor + All Formats
-// Usage: /ytdl?url=https://youtu.be/FkFvdukWpAI
+// Deno YouTube Extractor + Proxy Streaming
+// Usage:
+// 1) /ytdl?url=https://youtu.be/xxxx
+// 2) /stream?url=YOUTUBE_MEDIA_URL
 
 Deno.serve(async (req) => {
   const { pathname, searchParams } = new URL(req.url);
 
   if (pathname === "/") {
-    return json({
-      status: "success",
-      message: "🦕 Deno YouTube Extractor Running!\nUse /ytdl?url=..."
-    });
+    return json({ status: "success", message: "🦕 Deno YouTube Extractor Running!" });
   }
 
+  // ---------------- Metadata + Formats ----------------
   if (pathname === "/ytdl") {
     const ytUrl = searchParams.get("url");
     if (!ytUrl) return error("Missing ?url=");
 
     try {
-      // Fetch YouTube page
       const res = await fetch(ytUrl, { headers: { "User-Agent": "Mozilla/5.0" } });
       const html = await res.text();
 
-      // Extract ytInitialPlayerResponse
       const playerMatch = html.match(/ytInitialPlayerResponse\s*=\s*(\{.+?\});/s);
       if (!playerMatch) return error("Could not parse player JSON");
 
@@ -30,7 +28,6 @@ Deno.serve(async (req) => {
       const formats = streamingData.formats || [];
       const adaptive = streamingData.adaptiveFormats || [];
 
-      // Decode URL helper
       function getUrl(format: any) {
         if (format.url) return format.url;
         const cipher = format.signatureCipher || format.cipher;
@@ -39,7 +36,6 @@ Deno.serve(async (req) => {
         return params.get("url") || null;
       }
 
-      // Combine all formats
       const allFormats = [...formats, ...adaptive].map((f: any) => ({
         itag: f.itag,
         mimeType: f.mimeType,
@@ -47,11 +43,8 @@ Deno.serve(async (req) => {
         bitrate: f.bitrate || 0,
         audioBitrate: f.audioBitrate || 0,
         url: getUrl(f),
+        streamProxy: getUrl(f) ? `/stream?url=${encodeURIComponent(getUrl(f))}` : null
       }));
-
-      // Separate audio-only and video-only
-      const audioFormats = allFormats.filter(f => f.mimeType.includes("audio"));
-      const videoFormats = allFormats.filter(f => f.mimeType.includes("video"));
 
       return json({
         status: "success",
@@ -62,10 +55,30 @@ Deno.serve(async (req) => {
         durationSeconds: parseInt(videoDetails.lengthSeconds || "0", 10),
         thumbnails: videoDetails.thumbnail?.thumbnails || [],
         formats: allFormats,
-        audioFormats,
-        videoFormats,
+        audioFormats: allFormats.filter(f => f.mimeType.includes("audio")),
+        videoFormats: allFormats.filter(f => f.mimeType.includes("video"))
       });
 
+    } catch (err) {
+      return error(err.message);
+    }
+  }
+
+  // ---------------- Proxy Streaming ----------------
+  if (pathname === "/stream") {
+    const url = searchParams.get("url");
+    if (!url) return error("Missing ?url=");
+
+    try {
+      const res = await fetch(url, {
+        headers: { "User-Agent": "Mozilla/5.0", "Accept-Encoding": "identity" },
+      });
+      return new Response(res.body, {
+        headers: {
+          "content-type": res.headers.get("content-type") || "video/mp4",
+          "Cache-Control": "no-cache",
+        },
+      });
     } catch (err) {
       return error(err.message);
     }
@@ -76,9 +89,7 @@ Deno.serve(async (req) => {
 
 // ----------------- Helper Functions -----------------
 function json(obj: any) {
-  return new Response(JSON.stringify(obj, null, 2), {
-    headers: { "content-type": "application/json" },
-  });
+  return new Response(JSON.stringify(obj, null, 2), { headers: { "content-type": "application/json" } });
 }
 
 function error(msg: string) {
