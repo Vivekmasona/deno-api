@@ -1,28 +1,26 @@
 // main.ts
-// Deno Deploy YouTube Metadata API
-// Usage: /ytdl?url=https://youtu.be/FkFvdukWpAI
+// Deno YouTube Extractor with audio/video URLs
+// Example: https://yourapp.deno.dev/ytdl?url=https://youtu.be/FkFvdukWpAI
 
 Deno.serve(async (req) => {
   const { pathname, searchParams } = new URL(req.url);
 
   if (pathname === "/") {
     return new Response(
-      "🦕 Deno YouTube Metadata API\nUse /ytdl?url=https://youtu.be/VIDEO_ID",
-      { headers: { "content-type": "text/plain" } }
+      "🦕 Deno YouTube Extractor\nUse /ytdl?url=https://youtu.be/xxxx",
+      { headers: { "content-type": "text/plain" } },
     );
   }
 
-  // ---------------- VIDEO METADATA ----------------
   if (pathname === "/ytdl") {
     const ytUrl = searchParams.get("url");
     if (!ytUrl) return error("Missing ?url=");
 
     try {
-      // Fetch YouTube page
       const res = await fetch(ytUrl, { headers: { "User-Agent": "Mozilla/5.0" } });
       const html = await res.text();
 
-      // Parse ytInitialPlayerResponse
+      // Extract player JSON
       const playerMatch = html.match(/ytInitialPlayerResponse\s*=\s*(\{.+?\});/s);
       if (!playerMatch) return error("Could not parse ytInitialPlayerResponse");
 
@@ -32,29 +30,33 @@ Deno.serve(async (req) => {
       const formats = streamingData.formats || [];
       const adaptive = streamingData.adaptiveFormats || [];
 
-      const microformat = player.microformat?.playerMicroformatRenderer || {};
+      // Decode audio/video URLs
+      function getUrl(format: any) {
+        if (format.url) return format.url;
+        if (format.signatureCipher || format.cipher) {
+          // Simple parsing for demonstration
+          const cipher = format.signatureCipher || format.cipher;
+          const params = new URLSearchParams(cipher);
+          return params.get("url") || null;
+        }
+        return null;
+      }
 
-      // Build metadata object
-      const metadata = {
+      const audioFormat = adaptive.find((f: any) => f.mimeType.includes("audio"));
+      const videoFormat = formats.find((f: any) => f.mimeType.includes("video/mp4"));
+
+      return json({
         status: "success",
         title: videoDetails.title || "Unknown",
         videoId: videoDetails.videoId || "",
         author: videoDetails.author || "",
         channelId: videoDetails.channelId || "",
-        publishDate: microformat.publishDate || "",
         durationSeconds: parseInt(videoDetails.lengthSeconds || "0", 10),
         thumbnails: videoDetails.thumbnail?.thumbnails || [],
+        audioUrl: getUrl(audioFormat),
+        videoUrl: getUrl(videoFormat),
         formatsCount: formats.length + adaptive.length,
-        adaptiveFormats: adaptive.map((f: any) => ({
-          itag: f.itag,
-          mimeType: f.mimeType,
-          bitrate: f.bitrate,
-          approxDurationMs: f.approxDurationMs,
-          qualityLabel: f.qualityLabel || null,
-        })),
-      };
-
-      return json(metadata);
+      });
     } catch (err) {
       return error(err.message);
     }
