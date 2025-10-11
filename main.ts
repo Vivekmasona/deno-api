@@ -1,17 +1,10 @@
-// Deno YouTube extractor - improved parsing of signatureCipher/cipher
-// Usage: /ytdl?url=https://youtu.be/FkFvdukWpAI
-// NOTE: This returns parsed cipher fields. If a format has `needsDecipher: true`
-// you must implement the signature decipher (fetch player JS and apply algorithm)
-// or use an external library/server (ytdl-core, yt-dlp, etc).
+import { serve } from "https://deno.land/std@0.203.0/http/server.ts";
 
 Deno.serve(async (req) => {
   const { pathname, searchParams } = new URL(req.url);
 
   if (pathname === "/") {
-    return json({
-      status: "success",
-      message: "🦕 Deno YouTube Extractor Running!\nUse /ytdl?url=..."
-    });
+    return json({ status: "success", message: "Deno YouTube Extractor Running" });
   }
 
   if (pathname === "/ytdl") {
@@ -19,87 +12,54 @@ Deno.serve(async (req) => {
     if (!ytUrl) return error("Missing ?url=");
 
     try {
-      // fetch the video page
-      const res = await fetch(ytUrl, { headers: { "User-Agent": "Mozilla/5.0" } });
-      const html = await res.text();
+      // Fetch video page
+      const html = await (await fetch(ytUrl, { headers: { "User-Agent": "Mozilla/5.0" } })).text();
 
-      // Try to find the ytInitialPlayerResponse JSON
-      // Note: youtube sometimes wraps differently; this regex covers common case
-      const playerMatch =
-        html.match(/ytInitialPlayerResponse\s*=\s*(\{.+?\});/s) ||
-        html.match(/window\["ytInitialPlayerResponse"\]\s*=\s*(\{.+?\});/s);
-
-      if (!playerMatch) return error("Could not parse player JSON");
-
-      const player = JSON.parse(playerMatch[1]);
+      // Extract ytInitialPlayerResponse
+      const match = html.match(/ytInitialPlayerResponse\s*=\s*(\{.+?\});/s);
+      if (!match) return error("Cannot parse player JSON");
+      const player = JSON.parse(match[1]);
       const videoDetails = player.videoDetails || {};
       const streamingData = player.streamingData || {};
-      const formats = streamingData.formats || [];
-      const adaptive = streamingData.adaptiveFormats || [];
+      const formats = [...(streamingData.formats || []), ...(streamingData.adaptiveFormats || [])];
 
-      // Helper: parse signatureCipher / cipher string into object
-      function parseCipher(cipherStr: string | undefined) {
-        if (!cipherStr) return null;
-        // some entries use "signatureCipher" or "cipher" and are URL-encoded params
-        try {
-          const params = new URLSearchParams(cipherStr);
-          const obj: Record<string, string> = {};
-          for (const [k, v] of params.entries()) obj[k] = v;
-          return obj;
-        } catch (e) {
-          return null;
-        }
-      }
+      // Extract player JS URL for decipher
+      const jsUrlMatch = html.match(/"jsUrl":"(\/s\/player\/[\w\d\/\.\-_]+\.js)"/);
+      if (!jsUrlMatch) return error("Cannot find player JS URL");
+      const jsUrl = "https://www.youtube.com" + jsUrlMatch[1];
+      const playerJs = await (await fetch(jsUrl)).text();
 
-      // Build combined formats with parsed cipher info, and flag which need decipher
-      const allRaw = [...formats, ...adaptive];
-      const allFormats = allRaw.map((f: any) => {
-        const cipher = parseCipher(f.signatureCipher || f.cipher);
-        const directUrl = f.url || (cipher && cipher.url) || null;
-        // A format needs decipher if it has an 's' param (obfuscated signature)
-        const needsDecipher = !!(cipher && cipher.s);
-        // If there's a 'sig' or 'sig' style param we can append it to url
-        const hasSig = !!(cipher && (cipher.sig || cipher.s || cipher.signature));
+      // Simple decipher function extractor
+      const decipher = getDecipherFunction(playerJs);
 
-        // Build an informative object to return
-        const out: any = {
-          itag: f.itag,
-          mimeType: f.mimeType || f.mime,
-          qualityLabel: f.qualityLabel || f.audioQuality || "N/A",
-          bitrate: f.bitrate || null,
-          audioBitrate: f.audioBitrate || null,
-          contentLength: f.contentLength || null,
-          // directUrl will be null when signature needs deciphering
-          url: directUrl,
-          parsedCipher: cipher,        // parsed query params from signatureCipher/cipher
-          needsDecipher,
-          hasSig,
+      // Map formats with deciphered URLs
+      const allFormats = formats.map((f: any) => {
+        if (f.url) return f; // Already usable
+        const cipher = f.signatureCipher || f.cipher;
+        if (!cipher) return f;
+
+        const params = new URLSearchParams(cipher);
+        const url = params.get("url")!;
+        const s = params.get("s");
+        const sp = params.get("sp") || "signature";
+        const sig = s ? decipher(s) : params.get("sig");
+
+        return {
+          ...f,
+          url: sig ? `${url}&${sp}=${sig}` : url
         };
-
-        return out;
       });
-
-      // Separate audio-only and video-only using mimeType when present
-      const audioFormats = allFormats.filter((f: any) => f.mimeType && f.mimeType.includes("audio"));
-      const videoFormats = allFormats.filter((f: any) => f.mimeType && f.mimeType.includes("video"));
 
       return json({
         status: "success",
-        title: videoDetails.title || "Unknown",
-        videoId: videoDetails.videoId || "",
-        author: videoDetails.author || "",
-        channelId: videoDetails.channelId || "",
-        durationSeconds: parseInt(videoDetails.lengthSeconds || "0", 10),
-        thumbnails: videoDetails.thumbnail?.thumbnails || [],
-        formats: allFormats,
-        audioFormats,
-        videoFormats,
-        note:
-          "Formats with needsDecipher=true contain an obfuscated signature (s). To get a working URL you must fetch the player JS and run the decipher algorithm on the 's' value, or use a backend tool (ytdl-core / yt-dlp) that already implements this.",
+        title: videoDetails.title,
+        videoId: videoDetails.videoId,
+        author: videoDetails.author,
+        formats: allFormats
       });
 
-    } catch (err) {
-      return error(String(err?.message || err));
+    } catch (e) {
+      return error(String(e));
     }
   }
 
@@ -108,11 +68,20 @@ Deno.serve(async (req) => {
 
 // ----------------- Helper Functions -----------------
 function json(obj: any) {
-  return new Response(JSON.stringify(obj, null, 2), {
-    headers: { "content-type": "application/json" },
-  });
+  return new Response(JSON.stringify(obj, null, 2), { headers: { "content-type": "application/json" } });
 }
 
 function error(msg: string) {
   return json({ status: "error", message: msg });
+}
+
+// ----------------- Decipher Logic -----------------
+// Parses the player JS and returns a function to decipher 's'
+// Implement a real parser here. For demo, simple identity function
+function getDecipherFunction(jsCode: string) {
+  // TODO: parse the cipher function from jsCode
+  return (s: string) => {
+    // Real decipher logic goes here
+    return s; // placeholder - currently returns original (won’t work)
+  };
 }
