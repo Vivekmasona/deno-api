@@ -1,27 +1,28 @@
 // main.ts
-// Deno YouTube Extractor + Fresh URLs
-// Example: https://yourapp.deno.dev/ytdl?url=https://youtu.be/FkFvdukWpAI
+// Deno YouTube Extractor + Stream Proxy
+// Usage:
+// /ytdl?url=https://youtu.be/FkFvdukWpAI
+// /stream?url=<audio/video CDN URL>
 
 Deno.serve(async (req) => {
   const { pathname, searchParams } = new URL(req.url);
 
   if (pathname === "/") {
     return new Response(
-      "🦕 Deno YouTube Extractor\nUse /ytdl?url=https://youtu.be/xxxx",
+      "🦕 Deno YouTube Extractor\nUse /ytdl?url=... or /stream?url=...",
       { headers: { "content-type": "text/plain" } },
     );
   }
 
+  // ------------------- YTDL Endpoint -------------------
   if (pathname === "/ytdl") {
     const ytUrl = searchParams.get("url");
     if (!ytUrl) return error("Missing ?url=");
 
     try {
-      // Fetch YouTube page fresh
       const res = await fetch(ytUrl, { headers: { "User-Agent": "Mozilla/5.0" } });
       const html = await res.text();
 
-      // Extract ytInitialPlayerResponse
       const playerMatch = html.match(/ytInitialPlayerResponse\s*=\s*(\{.+?\});/s);
       if (!playerMatch) return error("Could not parse ytInitialPlayerResponse");
 
@@ -31,7 +32,7 @@ Deno.serve(async (req) => {
       const formats = streamingData.formats || [];
       const adaptive = streamingData.adaptiveFormats || [];
 
-      // Decode function for URL (handles signatureCipher)
+      // Decode function (handles signatureCipher)
       function getUrl(format: any) {
         if (!format) return null;
         if (format.url) return format.url;
@@ -41,7 +42,6 @@ Deno.serve(async (req) => {
         return params.get("url") || null;
       }
 
-      // Pick best audio & video formats
       const audioFormat = adaptive.find((f: any) => f.mimeType.includes("audio"));
       const videoFormat = formats.find((f: any) => f.mimeType.includes("video/mp4"));
 
@@ -57,6 +57,22 @@ Deno.serve(async (req) => {
         audioUrl: getUrl(audioFormat),
         videoUrl: getUrl(videoFormat),
         formatsCount: formats.length + adaptive.length,
+      });
+    } catch (err) {
+      return error(err.message);
+    }
+  }
+
+  // ------------------- STREAM PROXY -------------------
+  if (pathname === "/stream") {
+    const url = searchParams.get("url");
+    if (!url) return error("Missing ?url=");
+
+    try {
+      const res = await fetch(url, { headers: { "User-Agent": "Mozilla/5.0" } });
+      return new Response(res.body, {
+        status: res.status,
+        headers: { "content-type": res.headers.get("content-type") || "video/mp4" },
       });
     } catch (err) {
       return error(err.message);
