@@ -1,23 +1,27 @@
-// 🦕 Deno Instagram CDN Extractor
-// Example: https://yourapp.deno.dev/insta?url=https://www.instagram.com/reel/C4w8Qz6sHY9/
+// 🦕 Deno Instagram Video Search (Reels / Hashtags)
+// Example: https://yourapp.deno.dev/instasearch?q=hindi+song
 
 Deno.serve(async (req) => {
   const { pathname, searchParams } = new URL(req.url);
 
-  // Root message
+  // Root info
   if (pathname === "/") {
-    return new Response("🦕 Instagram CDN Extractor Running!\nUse /insta?url=", {
+    return new Response("🦕 Instagram Video Search API\nUse /instasearch?q=", {
       headers: { "content-type": "text/plain" },
     });
   }
 
-  // ✅ Instagram Extractor
-  if (pathname === "/insta") {
-    const instaUrl = searchParams.get("url");
-    if (!instaUrl) return error("Missing ?url=");
+  // ✅ Instagram Video Search
+  if (pathname === "/instasearch") {
+    const query = searchParams.get("q");
+    if (!query) return error("Missing ?q=");
 
     try {
-      const res = await fetch(instaUrl, {
+      // We use tag/explore search since Instagram search pages are blocked
+      const searchUrl = `https://www.instagram.com/web/search/topsearch/?context=blended&query=${encodeURIComponent(
+        query
+      )}&include_reel=true`;
+      const res = await fetch(searchUrl, {
         headers: {
           "User-Agent":
             "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:124.0) Gecko/20100101 Firefox/124.0",
@@ -25,50 +29,43 @@ Deno.serve(async (req) => {
         },
       });
 
-      const html = await res.text();
+      const json = await res.json();
 
-      // Try to extract from multiple possible script blocks
-      const match =
-        html.match(/window\.__additionalDataLoaded\('.*?',(.*?)\);<\/script>/s) ||
-        html.match(/window\.__initialDataLoaded\((.*?)\);<\/script>/s) ||
-        html.match(/<script type="application\/ld\+json">(.*?)<\/script>/s);
+      // Instagram sometimes returns users + hashtags + places
+      const reels: any[] = [];
 
-      if (!match) return error("Could not parse media info");
+      if (json?.users?.length) {
+        for (const user of json.users.slice(0, 5)) {
+          const username = user.user.username;
+          const reelUrl = `https://www.instagram.com/${username}/reels/`;
+          reels.push({
+            username,
+            profile_pic_url: user.user.profile_pic_url,
+            reelUrl,
+            type: "userReels",
+          });
+        }
+      }
 
-      const jsonText = match[1];
-      const data = JSON.parse(jsonText);
+      if (json?.hashtags?.length) {
+        for (const tag of json.hashtags.slice(0, 5)) {
+          const name = tag.hashtag.name;
+          const tagUrl = `https://www.instagram.com/explore/tags/${name}/`;
+          reels.push({
+            hashtag: `#${name}`,
+            postCount: tag.hashtag.media_count,
+            exploreUrl: tagUrl,
+            type: "hashtag",
+          });
+        }
+      }
 
-      // Handle Instagram’s new data structures
-      const media =
-        data.graphql?.shortcode_media ||
-        data.entry_data?.PostPage?.[0]?.graphql?.shortcode_media ||
-        data.video ||
-        data.image ||
-        null;
-
-      if (!media) return error("Media info missing in parsed data");
-
-      // Extract media details
-      const videoUrl = media.video_url || media.video?.contentUrl || null;
-      const imageUrl = media.display_url || media.image || null;
-      const caption =
-        media.edge_media_to_caption?.edges?.[0]?.node?.text ||
-        media.caption ||
-        media.title ||
-        "";
-      const username = media.owner?.username || data.author?.name || "Unknown";
-      const profilePic = media.owner?.profile_pic_url || null;
-      const isVideo = !!videoUrl;
-
-      // Final JSON output
-      return json({
+      // Clean response
+      return jsonRes({
         status: "success",
-        type: isVideo ? "video" : "image",
-        username,
-        caption,
-        imageUrl,
-        videoUrl,
-        profilePic,
+        query,
+        total: reels.length,
+        results: reels,
       });
     } catch (err) {
       return error(err.message);
@@ -79,12 +76,11 @@ Deno.serve(async (req) => {
 });
 
 // Helper functions
-function json(obj: any) {
+function jsonRes(obj: any) {
   return new Response(JSON.stringify(obj, null, 2), {
     headers: { "content-type": "application/json" },
   });
 }
-
 function error(message: string) {
-  return json({ status: "error", message });
+  return jsonRes({ status: "error", message });
 }
