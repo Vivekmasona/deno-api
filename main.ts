@@ -1,68 +1,50 @@
-// 🦕 DuckDuckGo JSON Search API Wrapper
-// Example: https://yourapp.deno.dev/search?q=hindi+funny
+// 🦕 Deno YouTube Extractor
+// Example: https://yourapp.deno.dev/ytdl?url=https://youtu.be/FkFvdukWpAI
 
 Deno.serve(async (req) => {
   const { pathname, searchParams } = new URL(req.url);
 
-  // Root info
   if (pathname === "/") {
-    return new Response(
-      "🦕 DuckDuckGo JSON Search API\nUse /search?q=your+query",
-      { headers: { "content-type": "text/plain" } }
-    );
+    return new Response("🦕 Deno YouTube Extractor\nUse /ytdl?url=https://youtu.be/xxxx", {
+      headers: { "content-type": "text/plain" },
+    });
   }
 
-  // Search endpoint
-  if (pathname === "/search") {
-    const query = searchParams.get("q");
-    if (!query) return error("Missing ?q=");
+  if (pathname === "/ytdl") {
+    const ytUrl = searchParams.get("url");
+    if (!ytUrl) return error("Missing ?url=");
 
     try {
-      // Fetch JSON from DuckDuckGo Instant Answer API
-      const url = `https://api.duckduckgo.com/?q=${encodeURIComponent(query)}&format=json&no_html=1&skip_disambig=1`;
-      const res = await fetch(url);
-      const data = await res.json();
+      // Fetch video page
+      const res = await fetch(ytUrl, { headers: { "User-Agent": "Mozilla/5.0" } });
+      const html = await res.text();
 
-      // Extract relevant results
-      const results: Array<{ title: string; link: string; snippet: string }> = [];
+      // Extract ytInitialPlayerResponse
+      const playerMatch = html.match(/ytInitialPlayerResponse\s*=\s*(\{.+?\});/s);
+      if (!playerMatch) return error("Could not parse ytInitialPlayerResponse");
 
-      // 1️⃣ RelatedTopics (main search results)
-      if (data.RelatedTopics?.length) {
-        for (const item of data.RelatedTopics) {
-          if (item.Text && item.FirstURL) {
-            results.push({
-              title: item.Text,
-              link: item.FirstURL,
-              snippet: item.Text,
-            });
-          } else if (item.Topics) {
-            for (const sub of item.Topics) {
-              if (sub.Text && sub.FirstURL) {
-                results.push({
-                  title: sub.Text,
-                  link: sub.FirstURL,
-                  snippet: sub.Text,
-                });
-              }
-            }
-          }
-        }
-      }
+      const player = JSON.parse(playerMatch[1]);
+      const videoDetails = player.videoDetails || {};
+      const streamingData = player.streamingData || {};
+      const formats = streamingData.formats || [];
+      const adaptiveFormats = streamingData.adaptiveFormats || [];
 
-      // 2️⃣ AbstractResult (if exists)
-      if (data.AbstractText && data.AbstractURL) {
-        results.unshift({
-          title: data.Heading || "Abstract",
-          link: data.AbstractURL,
-          snippet: data.AbstractText,
-        });
-      }
+      // Choose audio only or best video
+      const audio = adaptiveFormats.find((f: any) => f.mimeType.includes("audio")) || null;
+      const video = formats.find((f: any) => f.mimeType.includes("video/mp4")) || null;
 
       return json({
         status: "success",
-        query,
-        count: results.length,
-        results: results.slice(0, 10), // top 10 results
+        title: videoDetails.title || "Unknown",
+        videoId: videoDetails.videoId || "",
+        author: videoDetails.author || "",
+        channelId: videoDetails.channelId || "",
+        publishDate: player.microformat?.playerMicroformatRenderer?.publishDate || "",
+        durationSeconds: parseInt(videoDetails.lengthSeconds || "0", 10),
+        thumbnails: videoDetails.thumbnail?.thumbnails || [],
+        audioUrl: audio?.url || null,
+        videoUrl: video?.url || null,
+        formatsCount: formats.length + adaptiveFormats.length,
       });
     } catch (err) {
       return error(err.message);
@@ -72,14 +54,13 @@ Deno.serve(async (req) => {
   return new Response("404 Not Found", { status: 404 });
 });
 
-// ---------------- Helper Functions ----------------
-
+// ----------------- Helper Functions -----------------
 function json(obj: any) {
   return new Response(JSON.stringify(obj, null, 2), {
     headers: { "content-type": "application/json" },
   });
 }
 
-function error(message: string) {
-  return json({ status: "error", message });
+function error(msg: string) {
+  return json({ status: "error", message: msg });
 }
