@@ -1,28 +1,27 @@
 // main.ts
-// Deno YouTube Extractor + Stream Proxy
-// Usage:
-// /ytdl?url=https://youtu.be/FkFvdukWpAI
-// /stream?url=<audio/video CDN URL>
+// Deno YouTube Metadata API
+// Usage: /ytdl?url=https://youtu.be/FkFvdukWpAI
 
 Deno.serve(async (req) => {
   const { pathname, searchParams } = new URL(req.url);
 
   if (pathname === "/") {
     return new Response(
-      "🦕 Deno YouTube Extractor\nUse /ytdl?url=... or /stream?url=...",
-      { headers: { "content-type": "text/plain" } },
+      "🦕 Deno YouTube Metadata API\nUse /ytdl?url=https://youtu.be/VIDEO_ID",
+      { headers: { "content-type": "text/plain" } }
     );
   }
 
-  // ------------------- YTDL Endpoint -------------------
   if (pathname === "/ytdl") {
     const ytUrl = searchParams.get("url");
     if (!ytUrl) return error("Missing ?url=");
 
     try {
+      // Fetch YouTube page
       const res = await fetch(ytUrl, { headers: { "User-Agent": "Mozilla/5.0" } });
       const html = await res.text();
 
+      // Parse ytInitialPlayerResponse
       const playerMatch = html.match(/ytInitialPlayerResponse\s*=\s*(\{.+?\});/s);
       if (!playerMatch) return error("Could not parse ytInitialPlayerResponse");
 
@@ -32,20 +31,8 @@ Deno.serve(async (req) => {
       const formats = streamingData.formats || [];
       const adaptive = streamingData.adaptiveFormats || [];
 
-      // Decode function (handles signatureCipher)
-      function getUrl(format: any) {
-        if (!format) return null;
-        if (format.url) return format.url;
-        const cipher = format.signatureCipher || format.cipher;
-        if (!cipher) return null;
-        const params = new URLSearchParams(cipher);
-        return params.get("url") || null;
-      }
-
-      const audioFormat = adaptive.find((f: any) => f.mimeType.includes("audio"));
-      const videoFormat = formats.find((f: any) => f.mimeType.includes("video/mp4"));
-
-      return json({
+      // Build metadata object (No direct URLs)
+      const metadata = {
         status: "success",
         title: videoDetails.title || "Unknown",
         videoId: videoDetails.videoId || "",
@@ -54,26 +41,17 @@ Deno.serve(async (req) => {
         publishDate: player.microformat?.playerMicroformatRenderer?.publishDate || "",
         durationSeconds: parseInt(videoDetails.lengthSeconds || "0", 10),
         thumbnails: videoDetails.thumbnail?.thumbnails || [],
-        audioUrl: getUrl(audioFormat),
-        videoUrl: getUrl(videoFormat),
         formatsCount: formats.length + adaptive.length,
-      });
-    } catch (err) {
-      return error(err.message);
-    }
-  }
+        adaptiveFormats: adaptive.map((f: any) => ({
+          itag: f.itag,
+          mimeType: f.mimeType,
+          bitrate: f.bitrate,
+          approxDurationMs: f.approxDurationMs,
+          qualityLabel: f.qualityLabel || null,
+        })),
+      };
 
-  // ------------------- STREAM PROXY -------------------
-  if (pathname === "/stream") {
-    const url = searchParams.get("url");
-    if (!url) return error("Missing ?url=");
-
-    try {
-      const res = await fetch(url, { headers: { "User-Agent": "Mozilla/5.0" } });
-      return new Response(res.body, {
-        status: res.status,
-        headers: { "content-type": res.headers.get("content-type") || "video/mp4" },
-      });
+      return json(metadata);
     } catch (err) {
       return error(err.message);
     }
