@@ -1,56 +1,60 @@
 // main.ts
-// Deno + yt-dlp Hybrid YouTube API
-// Usage:
-// /ytdl?url=https://youtu.be/FkFvdukWpAI
-
-import { serve } from "https://deno.land/std@0.203.0/http/server.ts";
+// Deno Deploy YouTube Metadata API
+// Usage: /ytdl?url=https://youtu.be/FkFvdukWpAI
 
 Deno.serve(async (req) => {
   const { pathname, searchParams } = new URL(req.url);
 
   if (pathname === "/") {
     return new Response(
-      "🦕 Deno + yt-dlp YouTube API\nUse /ytdl?url=https://youtu.be/VIDEO_ID",
+      "🦕 Deno YouTube Metadata API\nUse /ytdl?url=https://youtu.be/VIDEO_ID",
       { headers: { "content-type": "text/plain" } }
     );
   }
 
+  // ---------------- VIDEO METADATA ----------------
   if (pathname === "/ytdl") {
     const ytUrl = searchParams.get("url");
     if (!ytUrl) return error("Missing ?url=");
 
     try {
-      // Run yt-dlp to get JSON metadata + URLs
-      const process = Deno.run({
-        cmd: ["yt-dlp", "-j", ytUrl],
-        stdout: "piped",
-        stderr: "piped",
-      });
+      // Fetch YouTube page
+      const res = await fetch(ytUrl, { headers: { "User-Agent": "Mozilla/5.0" } });
+      const html = await res.text();
 
-      const output = await process.output();
-      const status = await process.status();
-      process.close();
+      // Parse ytInitialPlayerResponse
+      const playerMatch = html.match(/ytInitialPlayerResponse\s*=\s*(\{.+?\});/s);
+      if (!playerMatch) return error("Could not parse ytInitialPlayerResponse");
 
-      if (!status.success) return error("yt-dlp failed");
+      const player = JSON.parse(playerMatch[1]);
+      const videoDetails = player.videoDetails || {};
+      const streamingData = player.streamingData || {};
+      const formats = streamingData.formats || [];
+      const adaptive = streamingData.adaptiveFormats || [];
 
-      const info = JSON.parse(new TextDecoder().decode(output));
+      const microformat = player.microformat?.playerMicroformatRenderer || {};
 
-      // Extract best audio + video URLs
-      const bestAudio = info.formats?.find((f: any) => f.acodec !== "none" && f.vcodec === "none");
-      const bestVideo = info.formats?.find((f: any) => f.vcodec !== "none" && f.acodec !== "none");
-
-      return json({
+      // Build metadata object
+      const metadata = {
         status: "success",
-        title: info.title,
-        videoId: info.id,
-        channel: info.uploader,
-        publishDate: info.upload_date,
-        durationSeconds: info.duration,
-        thumbnails: info.thumbnails || [],
-        audioUrl: bestAudio?.url || null,
-        videoUrl: bestVideo?.url || null,
-        formatsCount: info.formats?.length || 0,
-      });
+        title: videoDetails.title || "Unknown",
+        videoId: videoDetails.videoId || "",
+        author: videoDetails.author || "",
+        channelId: videoDetails.channelId || "",
+        publishDate: microformat.publishDate || "",
+        durationSeconds: parseInt(videoDetails.lengthSeconds || "0", 10),
+        thumbnails: videoDetails.thumbnail?.thumbnails || [],
+        formatsCount: formats.length + adaptive.length,
+        adaptiveFormats: adaptive.map((f: any) => ({
+          itag: f.itag,
+          mimeType: f.mimeType,
+          bitrate: f.bitrate,
+          approxDurationMs: f.approxDurationMs,
+          qualityLabel: f.qualityLabel || null,
+        })),
+      };
+
+      return json(metadata);
     } catch (err) {
       return error(err.message);
     }
