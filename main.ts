@@ -1,83 +1,51 @@
-// main.ts
-// Usage: /stream?url=<googlevideo_direct_url>
-// Example: https://yourapp.deno.dev/stream?url=<encoded_googlevideo_url>
+// mod.ts
+import { serve } from "https://deno.land/std@0.203.0/http/server.ts";
 
-Deno.serve(async (req) => {
-  const { pathname, searchParams } = new URL(req.url);
+// === HARDCODED TOKEN (user provided) ===
+const BOT_TOKEN = "8149225352:AAF8pkM10sed_Yzkxz51gfyszDcQuXV1mgg";
+// =======================================
 
-  if (pathname === "/") {
-    return new Response("Deno video proxy. Use /stream?url=", { headers: { "content-type": "text/plain" } });
-  }
+if (!BOT_TOKEN) {
+  console.error("BOT_TOKEN missing.");
+  Deno.exit(1);
+}
 
-  if (pathname === "/stream") {
-    const raw = searchParams.get("url");
-    if (!raw) return jsonErr("Missing ?url=");
-    // decode if encoded in query
-    const videoUrl = decodeURIComponent(raw);
+async function handleUpdate(update: any) {
+  try {
+    if (!update) return;
+    if (update.message && update.message.text) {
+      const from = update.message.from || {};
+      const name = from.first_name ?? from.username ?? "there";
+      const replyText = `Welcome to hack world — ${name} ke sath aaya message`;
 
-    try {
-      // Forward Range header if client requests partial content
-      const clientRange = req.headers.get("range") || undefined;
-
-      // Prepare headers to appear as a browser
-      const forwardHeaders: Record<string, string> = {
-        "User-Agent":
-          "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/127.0.0.0 Safari/537.36",
-        "Accept": "*/*",
-        "Accept-Language": "en-US,en;q=0.9",
-        "Referer": "https://www.youtube.com/",
-        // optional: "Origin": "https://www.youtube.com",
+      const payload = {
+        chat_id: update.message.chat.id,
+        text: replyText,
       };
-      if (clientRange) forwardHeaders["Range"] = clientRange;
 
-      const upstreamRes = await fetch(videoUrl, {
-        method: "GET",
-        headers: forwardHeaders,
+      await fetch(`https://api.telegram.org/bot${BOT_TOKEN}/sendMessage`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify(payload),
       });
+    }
+  } catch (err) {
+    console.error("handleUpdate error:", err);
+  }
+}
 
-      // If upstream denies (403/401), forward the status & body
-      if (!upstreamRes.ok) {
-        // Return the upstream status and text for debugging
-        const text = await upstreamRes.text().catch(() => "");
-        return new Response(text || `Upstream returned ${upstreamRes.status}`, {
-          status: upstreamRes.status,
-          headers: { "content-type": "text/plain" },
-        });
-      }
-
-      // Prepare response headers to client
-      const headers = new Headers();
-      const ct = upstreamRes.headers.get("content-type");
-      const cl = upstreamRes.headers.get("content-length");
-      const cr = upstreamRes.headers.get("content-range");
-      const acceptRanges = upstreamRes.headers.get("accept-ranges") || "bytes";
-
-      if (ct) headers.set("content-type", ct);
-      if (cl) headers.set("content-length", cl);
-      if (cr) headers.set("content-range", cr);
-      if (acceptRanges) headers.set("accept-ranges", acceptRanges);
-      // allow CORS if frontend will fetch
-      headers.set("Access-Control-Allow-Origin", "*");
-      headers.set("Access-Control-Allow-Methods", "GET, HEAD, OPTIONS");
-      headers.set("Cache-Control", "no-cache");
-
-      // Stream the body directly
-      return new Response(upstreamRes.body, {
-        status: upstreamRes.status === 206 ? 206 : 200,
-        headers,
-      });
+serve(async (req) => {
+  // Optionally check pathname if you want a custom path
+  if (req.method === "POST") {
+    try {
+      const body = await req.json();
+      // handle asynchronously so Telegram gets quick 200
+      handleUpdate(body).catch(console.error);
+      return new Response("OK", { status: 200 });
     } catch (err) {
-      return jsonErr(String(err));
+      console.error("Invalid update body:", err);
+      return new Response("Bad Request", { status: 400 });
     }
   }
-
-  return new Response("404 Not Found", { status: 404 });
+  return new Response("Hello — Telegram webhook ready", { status: 200 });
 });
-
-// helpers
-function jsonErr(msg: string) {
-  return new Response(JSON.stringify({ status: "error", message: msg }, null, 2), {
-    status: 400,
-    headers: { "content-type": "application/json" },
-  });
-}
