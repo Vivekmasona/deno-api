@@ -25,20 +25,22 @@ serve(async (req) => {
       return new Response("ok");
     }
 
-    // Prepare media messages
-    const mediaGroup = songs.map((song) => ({
-      type: "audio",
-      media: song.downloadUrl[1]?.link || "",
-      caption: `🎵 ${song.name}\n👤 ${song.primaryArtists || "Unknown"}`,
-      thumb: song.image[2]?.link || "",
-    }));
+    // Send each song as separate audio (native play button, no download)
+    for (const song of songs) {
+      const songUrl = song.downloadUrl[1]?.link;
+      if (!songUrl) continue;
 
-    // Send as media group
-    await fetch(`https://api.telegram.org/bot${BOT_TOKEN}/sendMediaGroup`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ chat_id, media: mediaGroup }),
-    });
+      await fetch(`https://api.telegram.org/bot${BOT_TOKEN}/sendAudio`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          chat_id,
+          audio: songUrl,
+          caption: `🎵 ${song.name}\n👤 ${song.primaryArtists || "Unknown Artist"}`,
+          thumb: song.image[2]?.link || "",
+        }),
+      });
+    }
 
     return new Response("ok", { status: 200 });
   }
