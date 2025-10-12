@@ -11,7 +11,6 @@ serve(async (req) => {
 
     if (!chat_id || !text) return new Response("ok", { status: 200 });
 
-    // Fetch top 10 songs
     const apiRes = await fetch(SVN_API_BASE + encodeURIComponent(text));
     const data = await apiRes.json().catch(() => null);
     const songs = data?.data?.results?.slice(0, 10) || [];
@@ -25,19 +24,22 @@ serve(async (req) => {
       return new Response("ok");
     }
 
-    // Send each song as separate audio (native play button, no download)
+    // Send each song as native Telegram audio
     for (const song of songs) {
-      const songUrl = song.downloadUrl[1]?.link;
-      if (!songUrl) continue;
+      const audioUrl = song.downloadUrl[1]?.link;
+      const poster = song.image[2]?.link || "";
+      const caption = `🎵 ${song.name}\n👤 ${song.primaryArtists || "Unknown"}`;
+
+      if (!audioUrl) continue;
 
       await fetch(`https://api.telegram.org/bot${BOT_TOKEN}/sendAudio`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
           chat_id,
-          audio: songUrl,
-          caption: `🎵 ${song.name}\n👤 ${song.primaryArtists || "Unknown Artist"}`,
-          thumb: song.image[2]?.link || "",
+          audio: audioUrl,
+          caption,
+          thumb: poster,
         }),
       });
     }
