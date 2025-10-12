@@ -7,61 +7,56 @@ serve(async (req) => {
   if (req.method === "POST") {
     const body = await req.json().catch(() => ({}));
 
-    if (body.message && body.message.text) {
+    if (body.message?.text) {
       const chat_id = body.message.chat.id;
       const text = body.message.text;
 
-      // Search song via SVN API
+      // Fetch song from SVN API
       const apiRes = await fetch(SVN_API_BASE + encodeURIComponent(text));
       const data = await apiRes.json().catch(() => null);
 
       if (data?.data?.results?.length > 0) {
-        const song = data.data.results[0]; // take first result
-        const audioUrl = song.downloadUrl[1]?.link || "";
-        const title = song.name || "Unknown Title";
-        const performer = song.primaryArtists || "Unknown Artist";
-        const thumb = song.image[2]?.link || "";
+        const song = data.data.results[0];
+        const songUrl = song.downloadUrl[1]?.link || "";
+        const songName = song.name;
+        const artist = song.primaryArtists || "Unknown Artist";
+        const poster = song.image[2]?.link || "";
 
-        if (audioUrl) {
-          // Send audio with play button
-          await fetch(`https://api.telegram.org/bot${BOT_TOKEN}/sendAudio`, {
-            method: "POST",
-            headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({
-              chat_id,
-              audio: audioUrl,
-              title: title,
-              performer: performer,
-              thumb: thumb,
-            }),
-          });
-        } else {
-          // fallback if audio not available
-          await fetch(`https://api.telegram.org/bot${BOT_TOKEN}/sendMessage`, {
-            method: "POST",
-            headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({
-              chat_id,
-              text: `❌ Song not available: ${title}`,
-            }),
-          });
-        }
+        // Send audio with caption + poster
+        await fetch(`https://api.telegram.org/bot${BOT_TOKEN}/sendAudio`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            chat_id,
+            audio: songUrl,
+            caption: `🎵 ${songName}\n👤 ${artist}`,
+            thumb: poster,
+            parse_mode: "HTML",
+            reply_markup: {
+              inline_keyboard: [
+                [
+                  { text: "⏮ Prev", callback_data: "prev" },
+                  { text: "⏯ Play/Pause", callback_data: "playpause" },
+                  { text: "⏭ Next", callback_data: "next" }
+                ]
+              ]
+            }
+          })
+        });
       } else {
         await fetch(`https://api.telegram.org/bot${BOT_TOKEN}/sendMessage`, {
           method: "POST",
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({
             chat_id,
-            text: "❌ Song not found in SVN!",
-          }),
+            text: "❌ Song not found in SVN!"
+          })
         });
       }
     }
+
     return new Response("ok", { status: 200 });
   }
 
-  return new Response("Hello! This is the VivekFy Bot.", {
-    status: 200,
-    headers: { "Content-Type": "text/plain" },
-  });
+  return new Response("Hello! Bot is running.", { status: 200 });
 });
