@@ -1,14 +1,20 @@
 // server.ts
-// Deno version of your server.js (Express + Socket.io equivalent)
+// Deno compatible Express + Socket.io replacement
+// Works on Deno Deploy or local run: deno run --allow-net --allow-read server.ts
 
-// ================== IMPORTS ==================
 import { serve } from "https://deno.land/std@0.224.0/http/server.ts";
 import { serveDir } from "https://deno.land/std@0.224.0/http/file_server.ts";
-import { corsHeaders } from "https://deno.land/x/cors_headers@v1.0.0/mod.ts";
 import { Server } from "https://esm.sh/socket.io@4.7.5";
 import { createServer } from "https://deno.land/std@0.224.0/http/server.ts";
 
-// ================== HTTP + SOCKET.IO ==================
+// ================== Simple CORS helper ==================
+const corsHeaders = {
+  "Access-Control-Allow-Origin": "*",
+  "Access-Control-Allow-Methods": "GET, POST, OPTIONS",
+  "Access-Control-Allow-Headers": "Content-Type, Authorization",
+};
+
+// ================== SOCKET.IO SETUP ==================
 const httpServer = createServer({ port: 3000 });
 const io = new Server(httpServer, {
   cors: {
@@ -19,7 +25,6 @@ const io = new Server(httpServer, {
 
 console.log("✅ Deno Socket.io Server started on :3000");
 
-// ================== SOCKET.IO PART ==================
 const activeUsers = new Map<string, string>();
 
 io.on("connection", (socket) => {
@@ -32,27 +37,22 @@ io.on("connection", (socket) => {
   });
 
   socket.on("call-request", ({ roomID }) => {
-    console.log(`Call request from ${socket.id} to room ${roomID}`);
     socket.to(roomID).emit("incoming-call", { from: socket.id });
   });
 
   socket.on("call-accepted", ({ to }) => {
-    console.log(`Call accepted by ${socket.id}`);
     io.to(to).emit("call-accepted");
   });
 
   socket.on("call-rejected", ({ to }) => {
-    console.log(`Call rejected by ${socket.id}`);
     io.to(to).emit("call-rejected");
   });
 
   socket.on("offer", ({ offer, roomID }) => {
-    console.log(`Offer sent to room: ${roomID}`);
     socket.to(roomID).emit("offer", { offer });
   });
 
   socket.on("answer", ({ answer, roomID }) => {
-    console.log(`Answer sent to room: ${roomID}`);
     socket.to(roomID).emit("answer", { answer });
   });
 
@@ -61,12 +61,10 @@ io.on("connection", (socket) => {
   });
 
   socket.on("end-call", (roomID: string) => {
-    console.log(`Call ended in room: ${roomID}`);
     socket.to(roomID).emit("call-ended");
   });
 
   socket.on("disconnect", () => {
-    console.log("User disconnected:", socket.id);
     const roomID = activeUsers.get(socket.id);
     if (roomID) {
       socket.to(roomID).emit("call-ended");
@@ -82,13 +80,8 @@ async function handler(req: Request): Promise<Response> {
   const url = new URL(req.url);
   const path = url.pathname;
 
-  // CORS headers (for frontend)
   if (req.method === "OPTIONS") {
-    return new Response(null, {
-      headers: {
-        ...corsHeaders,
-      },
-    });
+    return new Response(null, { headers: corsHeaders });
   }
 
   if (path === "/ping") {
@@ -107,11 +100,8 @@ async function handler(req: Request): Promise<Response> {
     const devices = sessions.get(sessionId)!;
     devices.set(deviceId, now);
 
-    // Remove inactive devices (>15s)
     for (const [d, last] of devices.entries()) {
-      if (now - last > 15000) {
-        devices.delete(d);
-      }
+      if (now - last > 15000) devices.delete(d);
     }
 
     const onlineCount = devices.size;
@@ -126,10 +116,7 @@ async function handler(req: Request): Promise<Response> {
     return Response.json(output, { headers: corsHeaders });
   }
 
-  // Default serve
-  return serveDir(req, {
-    fsRoot: ".",
-  });
+  return serveDir(req, { fsRoot: "." });
 }
 
 // ================== START SERVER ==================
