@@ -1,34 +1,32 @@
 // server.ts
-// Deno compatible Express + Socket.io replacement
-// Works on Deno Deploy or local run: deno run --allow-net --allow-read server.ts
+// Deno version of Express + Socket.io combined single-port server
 
 import { serve } from "https://deno.land/std@0.224.0/http/server.ts";
-import { serveDir } from "https://deno.land/std@0.224.0/http/file_server.ts";
 import { Server } from "https://esm.sh/socket.io@4.7.5";
-import { createServer } from "https://deno.land/std@0.224.0/http/server.ts";
+import { instrument } from "https://esm.sh/@socket.io/admin-ui@0.1.0";
 
-// ================== Simple CORS helper ==================
+// ================== CORS HEADERS ==================
 const corsHeaders = {
   "Access-Control-Allow-Origin": "*",
   "Access-Control-Allow-Methods": "GET, POST, OPTIONS",
   "Access-Control-Allow-Headers": "Content-Type, Authorization",
 };
 
-// ================== SOCKET.IO SETUP ==================
-const httpServer = createServer({ port: 3000 });
-const io = new Server(httpServer, {
+// ================== SOCKET.IO SERVER ==================
+const io = new Server({
   cors: {
     origin: "*",
     methods: ["GET", "POST"],
   },
 });
 
-console.log("✅ Deno Socket.io Server started on :3000");
+instrument(io, { auth: false });
 
+// Active users map
 const activeUsers = new Map<string, string>();
 
 io.on("connection", (socket) => {
-  console.log("A user connected:", socket.id);
+  console.log("✅ User connected:", socket.id);
 
   socket.on("join-room", (roomID: string) => {
     socket.join(roomID);
@@ -73,7 +71,7 @@ io.on("connection", (socket) => {
   });
 });
 
-// ================== REST API ==================
+// ================== REST SESSION API ==================
 const sessions = new Map<string, Map<string, number>>();
 
 async function handler(req: Request): Promise<Response> {
@@ -116,9 +114,15 @@ async function handler(req: Request): Promise<Response> {
     return Response.json(output, { headers: corsHeaders });
   }
 
-  return serveDir(req, { fsRoot: "." });
+  return new Response("Deno + Socket.io server running", {
+    headers: corsHeaders,
+  });
 }
 
 // ================== START SERVER ==================
-serve(handler, { port: 8080 });
-console.log("🌐 HTTP server running at http://localhost:8080");
+console.log("🚀 Server running on :8080");
+
+serve((req) => {
+  // Integrate socket.io with Deno serve
+  return io.handler(req, handler);
+}, { port: 8080 });
