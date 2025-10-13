@@ -1,4 +1,4 @@
-import { Application, Router, send } from "https://deno.land/x/oak@v13.3.2/mod.ts";
+import { Application, Router } from "https://deno.land/x/oak@v12.5.0/mod.ts";
 import { DOMParser, Element } from "https://deno.land/x/deno_dom/deno-dom-wasm.ts";
 
 // Helper to escape HTML
@@ -18,7 +18,6 @@ async function getFirstResultUrl(query: string): Promise<string | null> {
   const doc = new DOMParser().parseFromString(text, "text/html");
   if (!doc) return null;
 
-  // Try common selector
   let link: string | null = null;
   const a1 = doc.querySelector("a.result__a") as Element | null;
   if (a1 && a1.getAttribute("href")) link = a1.getAttribute("href");
@@ -28,7 +27,7 @@ async function getFirstResultUrl(query: string): Promise<string | null> {
     if (a2 && a2.getAttribute("href")) link = a2.getAttribute("href");
   }
 
-  // Check for uddg param (redirect)
+  // Redirect links with uddg param
   if (link && link.includes("uddg=")) {
     try {
       const url = new URL("https://duckduckgo.com" + link);
@@ -94,7 +93,6 @@ router
           </body></html>
         `;
       } else {
-        // Proxy mode: fetch page content
         try {
           const pageResp = await fetch(firstUrl, { headers: { "User-Agent": "Mozilla/5.0" } });
           const pageHtml = await pageResp.text();
