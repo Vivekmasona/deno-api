@@ -2,44 +2,40 @@ import { serve } from "https://deno.land/std@0.203.0/http/server.ts";
 
 const PORT = Number(Deno.env.get("PORT")) || 8000;
 
-// Clean HTML tags
-function cleanText(s: string) {
-  return s.replace(/<[^>]*>/g, "").replace(/\s+/g, " ").trim();
+// Simple math detection
+function isMathQuery(q: string) {
+  return /[\d+\-*/%÷×^=()]/.test(q);
 }
 
-// Fetch top Bing search result and extract article summary
-async function fetchTopArticleSummary(query: string): Promise<string> {
+// Evaluate simple arithmetic
+function computeMath(q: string): string {
   try {
-    const searchUrl = `https://www.bing.com/search?q=${encodeURIComponent(query)}`;
-    const res = await fetch(searchUrl, { headers: { "User-Agent": "Mozilla/5.0" } });
-    const html = await res.text();
+    // Replace ÷ and × with JS operators
+    const expr = q.replace(/÷/g, "/").replace(/×/g, "*");
+    // eslint-disable-next-line no-eval
+    const result = eval(expr);
+    if (result !== undefined) return `${q} = ${result}`;
+    return "Unable to compute.";
+  } catch {
+    return "Unable to compute.";
+  }
+}
 
-    // Extract first result link
-    const regex = /<li class="b_algo">.*?<a href="([^"]+)"[^>]*>/i;
-    const match = regex.exec(html);
-    if (!match) return "Sorry, no answer found.";
-
-    const link = match[1];
-
-    // Fetch top article content
-    const pageRes = await fetch(link, { headers: { "User-Agent": "Mozilla/5.0" } });
-    const pageHtml = await pageRes.text();
-
-    const paragraphs = Array.from(pageHtml.matchAll(/<p>(.*?)<\/p>/gi))
-      .map(p => cleanText(p[1]))
-      .filter(p => p.split(" ").length > 20) // meaningful paragraphs
-      .slice(0, 3); // top 3 paragraphs
-
-    if (paragraphs.length === 0) return "Sorry, no answer found.";
-
-    // Concise single paragraph
-    return paragraphs.join(" ").slice(0, 1000); // limit characters
+// Fetch Wikipedia summary
+async function fetchWikiSummary(query: string): Promise<string> {
+  try {
+    const url = `https://en.wikipedia.org/api/rest_v1/page/summary/${encodeURIComponent(query)}`;
+    const res = await fetch(url);
+    if (!res.ok) return "Sorry, no answer found.";
+    const data = await res.json();
+    if (data.extract) return data.extract;
+    return "Sorry, no answer found.";
   } catch {
     return "Sorry, no answer found.";
   }
 }
 
-console.log(`Top-article QA server (Bing) running on http://localhost:${PORT}`);
+console.log(`Wiki + Math QA server running on http://localhost:${PORT}`);
 
 serve(async (req) => {
   const { pathname, searchParams } = new URL(req.url);
@@ -50,16 +46,18 @@ serve(async (req) => {
       return new Response(JSON.stringify({ error: "Missing query parameter 'q'" }), { headers: { "Content-Type": "application/json" } });
     }
 
-    const summary = await fetchTopArticleSummary(query);
+    let summary: string;
+
+    if (isMathQuery(query)) {
+      summary = computeMath(query);
+    } else {
+      summary = await fetchWikiSummary(query);
+    }
 
     return new Response(JSON.stringify({
       query,
-      answer: {
-        summary
-      }
-    }, null, 2), {
-      headers: { "Content-Type": "application/json" }
-    });
+      answer: { summary }
+    }, null, 2), { headers: { "Content-Type": "application/json" } });
   }
 
   return new Response(JSON.stringify({ message: "Use /ask?q=your+question" }), { headers: { "Content-Type": "application/json" } });
