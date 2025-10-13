@@ -14,7 +14,7 @@ function cleanText(s: string) {
   return s.replace(/<[^>]*>/g, "").replace(/\s+/g, " ").trim();
 }
 
-// Compute simple relevance score based on query in title/url
+// Simple relevance scoring: query words in title/URL
 function relevanceScore(title: string, url: string, query: string): number {
   const qWords = query.toLowerCase().split(/\s+/);
   let score = 0;
@@ -54,14 +54,17 @@ async function fetchDuckResults(query: string, max = 15): Promise<Result[]> {
   return results;
 }
 
-// Try to fetch summary text from page
+// Fetch page summary (first 3 paragraphs with >20 words)
 async function fetchSummary(url: string): Promise<string | undefined> {
   try {
     const res = await fetch(url, { headers: { "User-Agent": "Mozilla/5.0" } });
     const html = await res.text();
 
-    // Extract first 2–3 paragraphs
-    const paragraphs = Array.from(html.matchAll(/<p>(.*?)<\/p>/gi)).slice(0, 3).map(p => cleanText(p[1]));
+    const paragraphs = Array.from(html.matchAll(/<p>(.*?)<\/p>/gi))
+      .map(p => cleanText(p[1]))
+      .filter(p => p.split(" ").length > 10)
+      .slice(0, 3);
+
     if (paragraphs.length === 0) return undefined;
     return paragraphs.join(" ");
   } catch {
@@ -69,12 +72,12 @@ async function fetchSummary(url: string): Promise<string | undefined> {
   }
 }
 
-console.log(`Google-style JSON search running on http://localhost:${PORT}`);
+console.log(`Internet Question-Answer JSON server running on http://localhost:${PORT}`);
 
 serve(async (req) => {
   const { pathname, searchParams } = new URL(req.url);
 
-  if (pathname === "/search") {
+  if (pathname === "/ask") {
     const query = searchParams.get("q")?.trim();
     if (!query) {
       return new Response(JSON.stringify({ error: "Missing query parameter 'q'" }), { headers: { "Content-Type": "application/json" } });
@@ -83,34 +86,31 @@ serve(async (req) => {
     try {
       let results = await fetchDuckResults(query, 15);
       if (results.length === 0) {
-        return new Response(JSON.stringify({ query, top_article: null, other_results: [] }), { headers: { "Content-Type": "application/json" } });
+        return new Response(JSON.stringify({ query, answer: null, other_results: [] }), { headers: { "Content-Type": "application/json" } });
       }
 
-      // Compute relevance score
-      for (const r of results) {
-        r.score = relevanceScore(r.title, r.url, query);
-      }
+      // Compute relevance scores
+      for (const r of results) r.score = relevanceScore(r.title, r.url, query);
 
       // Sort descending by score
       results.sort((a, b) => (b.score || 0) - (a.score || 0));
 
-      // Find top article with content snippet
-      let top_article: Result | null = null;
+      // Try to find top answer with meaningful summary
+      let top_answer: Result | null = null;
       for (const r of results) {
         const summary = await fetchSummary(r.url);
-        if (summary && summary.split(" ").length > 20) { // require min 20 words
-          top_article = { ...r, summary };
+        if (summary && summary.split(" ").length > 20) {
+          top_answer = { ...r, summary };
           break;
         }
       }
 
-      // If no good article found, use first result as top_article
-      if (!top_article) top_article = results[0];
+      // If no good summary, fallback to first result
+      if (!top_answer) top_answer = results[0];
 
-      // Remove top_article from other_results
-      const other_results = results.filter(r => r.url !== top_article.url).slice(0, 10);
+      const other_results = results.filter(r => r.url !== top_answer.url).slice(0, 10);
 
-      return new Response(JSON.stringify({ query, top_article, other_results }, null, 2), {
+      return new Response(JSON.stringify({ query, answer: top_answer, other_results }, null, 2), {
         headers: { "Content-Type": "application/json" }
       });
 
@@ -119,5 +119,5 @@ serve(async (req) => {
     }
   }
 
-  return new Response(JSON.stringify({ message: "Use /search?q=your+query" }), { headers: { "Content-Type": "application/json" } });
+  return new Response(JSON.stringify({ message: "Use /ask?q=your+question" }), { headers: { "Content-Type": "application/json" } });
 }, { port: PORT });
