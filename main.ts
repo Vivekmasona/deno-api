@@ -2,6 +2,7 @@ import { serve } from "https://deno.land/std@0.203.0/http/server.ts";
 
 const PORT = Number(Deno.env.get("PORT")) || 8000;
 
+// Escape HTML
 function escapeHtml(s: string) {
   return s.replace(/&/g, "&amp;")
           .replace(/</g, "&lt;")
@@ -9,30 +10,33 @@ function escapeHtml(s: string) {
           .replace(/"/g, "&quot;");
 }
 
-async function getFirstDuckUrl(query: string): Promise<string | null> {
+// Fetch DuckDuckGo top results (simple HTML parse)
+async function getDuckResults(query: string, max = 5): Promise<{title:string,url:string}[]> {
   const url = `https://html.duckduckgo.com/html?q=${encodeURIComponent(query)}`;
   const res = await fetch(url, { headers: { "User-Agent": "Mozilla/5.0" } });
   const html = await res.text();
 
-  // Simple regex to extract first href from a.result__a
-  const match = html.match(/<a[^>]+class="result__a"[^>]+href="([^"]+)"/i);
-  if (!match) return null;
-  let link = match[1];
-
-  // Check for uddg redirect param
-  if (link.includes("uddg=")) {
-    try {
-      const u = new URL("https://duckduckgo.com" + link);
-      const encoded = u.searchParams.get("uddg");
-      if (encoded) link = decodeURIComponent(encoded);
-    } catch {}
+  const results: {title:string,url:string}[] = [];
+  const regex = /<a[^>]+class="result__a"[^>]*href="([^"]+)"[^>]*>(.*?)<\/a>/gi;
+  let match;
+  while ((match = regex.exec(html)) !== null && results.length < max) {
+    let link = match[1];
+    let title = match[2].replace(/<[^>]*>/g, ""); // strip inner HTML
+    if (link.includes("uddg=")) {
+      try {
+        const u = new URL("https://duckduckgo.com" + link);
+        const encoded = u.searchParams.get("uddg");
+        if (encoded) link = decodeURIComponent(encoded);
+      } catch {}
+    }
+    if (/^https?:\/\//i.test(link)) {
+      results.push({title, url: link});
+    }
   }
-
-  if (!/^https?:\/\//i.test(link)) return null;
-  return link;
+  return results;
 }
 
-console.log(`Deno hostable mini-browser running on http://localhost:${PORT}`);
+console.log(`Deno Internet Search running on http://localhost:${PORT}`);
 
 serve(async (req) => {
   const { pathname, searchParams } = new URL(req.url);
@@ -40,15 +44,11 @@ serve(async (req) => {
   if (pathname === "/") {
     return new Response(`
       <html>
-        <head><meta charset="utf-8"><title>Hostable Mini Browser</title></head>
+        <head><meta charset="utf-8"><title>Internet Search Mini Browser</title></head>
         <body style="font-family:system-ui;padding:20px">
-          <h2>Enter search name</h2>
+          <h2>Search Internet</h2>
           <form method="GET" action="/search">
-            <input name="q" placeholder="Search term" style="width:60%;padding:8px" required>
-            <select name="mode" style="padding:8px">
-              <option value="link">Show URL only</option>
-              <option value="proxy">Show proxied content</option>
-            </select>
+            <input name="q" placeholder="Type search term" style="width:60%;padding:8px" required>
             <button type="submit" style="padding:8px 12px">Search</button>
           </form>
         </body>
@@ -58,38 +58,35 @@ serve(async (req) => {
 
   if (pathname === "/search") {
     const q = searchParams.get("q")?.trim() || "";
-    const mode = searchParams.get("mode") || "link";
-    if (!q) return new Response("Provide a search term");
+    if (!q) return new Response("Provide search term");
 
-    const firstUrl = await getFirstDuckUrl(q);
-    if (!firstUrl) return new Response(`<p>No result found for ${escapeHtml(q)}</p>`, { headers: { "Content-Type": "text/html" } });
+    try {
+      const results = await getDuckResults(q, 5);
+      if (results.length === 0) return new Response(`<p>No results found for ${escapeHtml(q)}</p><a href="/">Back</a>`, { headers: { "Content-Type": "text/html" } });
 
-    if (mode === "link") {
-      return new Response(`
-        <html><body style="font-family:system-ui;padding:20px">
-          <h3>Top result for: ${escapeHtml(q)}</h3>
-          <p><a href="${escapeHtml(firstUrl)}" target="_blank">${escapeHtml(firstUrl)}</a></p>
-          <p><a href="/search?q=${encodeURIComponent(q)}&mode=proxy" target="_blank">Proxy page</a></p>
-          <p><a href="/">New search</a></p>
-        </body></html>
-      `, { headers: { "Content-Type": "text/html" } });
-    } else {
-      // proxy mode: fetch page content
-      try {
-        const pageResp = await fetch(firstUrl, { headers: { "User-Agent": "Mozilla/5.0" } });
-        const pageHtml = await pageResp.text();
-        return new Response(`
-          <html><body style="margin:0;padding:0">
-            <div style="padding:10px;background:#eee;border-bottom:1px solid #ccc">
-              <b>Search:</b> ${escapeHtml(q)} | <b>URL:</b> <a href="${escapeHtml(firstUrl)}" target="_blank">${escapeHtml(firstUrl)}</a>
-              &nbsp;|&nbsp; <a href="/">New search</a>
-            </div>
-            <div style="padding:12px">${pageHtml}</div>
-          </body></html>
-        `, { headers: { "Content-Type": "text/html" } });
-      } catch (err) {
-        return new Response(`<p>Failed to fetch page: ${escapeHtml(err.message)}</p><a href="/">Back</a>`, { headers: { "Content-Type": "text/html" } });
+      let html = `<html><body style="font-family:system-ui;padding:20px">
+        <h3>Top results for: ${escapeHtml(q)}</h3>
+        <ul>`;
+      for (const r of results) {
+        html += `<li><a href="/proxy?url=${encodeURIComponent(r.url)}" target="_blank">${escapeHtml(r.title)}</a> - <a href="${escapeHtml(r.url)}" target="_blank">Direct</a></li>`;
       }
+      html += `</ul><p><a href="/">New search</a></p></body></html>`;
+
+      return new Response(html, { headers: { "Content-Type": "text/html" } });
+    } catch (err) {
+      return new Response(`<p>Error: ${escapeHtml(err.message)}</p><a href="/">Back</a>`, { headers: { "Content-Type": "text/html" } });
+    }
+  }
+
+  if (pathname === "/proxy") {
+    const url = searchParams.get("url");
+    if (!url) return new Response("Missing url");
+    try {
+      const res = await fetch(url, { headers: { "User-Agent": "Mozilla/5.0" } });
+      const text = await res.text();
+      return new Response(text, { headers: { "Content-Type": "text/html" } });
+    } catch (err) {
+      return new Response(`<p>Failed to fetch: ${escapeHtml(err.message)}</p><a href="/">Back</a>`, { headers: { "Content-Type": "text/html" } });
     }
   }
 
