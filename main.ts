@@ -32,20 +32,23 @@ async function fetchTopArticleSummary(query: string): Promise<string> {
     const pageRes = await fetch(link, { headers: { "User-Agent": "Mozilla/5.0" } });
     const pageHtml = await pageRes.text();
 
+    // Extract meaningful paragraphs
     const paragraphs = Array.from(pageHtml.matchAll(/<p>(.*?)<\/p>/gi))
       .map(p => cleanText(p[1]))
-      .filter(p => p.split(" ").length > 20) // meaningful paragraphs
-      .slice(0, 5);
+      .filter(p => p.split(" ").length > 20)
+      .slice(0, 3); // top 3 paragraphs
 
     if (paragraphs.length === 0) return "Sorry, no answer found.";
 
-    return paragraphs.join(" ");
+    // Concise single paragraph AI-style
+    const summary = paragraphs.join(" ").slice(0, 800); // limit chars for readability
+    return summary;
   } catch {
     return "Sorry, no answer found.";
   }
 }
 
-console.log(`Top-article QA server running on http://localhost:${PORT}`);
+console.log(`Google AI-style QA server running on http://localhost:${PORT}`);
 
 serve(async (req) => {
   const { pathname, searchParams } = new URL(req.url);
