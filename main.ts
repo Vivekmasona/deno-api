@@ -1,121 +1,93 @@
-// server.ts
-// 100% Deno Deploy compatible WebRTC signaling server (no esm.sh)
-
+// Run with: deno run --allow-net server.ts
 import { serve } from "https://deno.land/std@0.224.0/http/server.ts";
 
-const corsHeaders = {
-  "Access-Control-Allow-Origin": "*",
-  "Access-Control-Allow-Methods": "GET, POST, OPTIONS",
-  "Access-Control-Allow-Headers": "Content-Type, Authorization",
-};
+interface User {
+  uid: string;
+  ws: WebSocket;
+  avatar: string;
+  name: string;
+}
 
-// Room management
-const rooms = new Map<string, Set<WebSocket>>();
+const waitingUsers: User[] = [];
+const rooms: Record<string, User[]> = {};
 
-// Session heartbeat map
-const sessions = new Map<string, Map<string, number>>();
+console.log("Deno WebSocket server running on :8080");
 
-// ========== Main HTTP Handler ==========
-serve(async (req) => {
-  const { pathname, searchParams } = new URL(req.url);
+serve((req) => {
+  const { socket, response } = Deno.upgradeWebSocket(req);
+  let currentUser: User | null = null;
+  let currentRoom: string | null = null;
 
-  // --- CORS preflight ---
-  if (req.method === "OPTIONS") {
-    return new Response(null, { headers: corsHeaders });
-  }
+  socket.onopen = () => {
+    console.log("Client connected");
+  };
 
-  // --- WebSocket endpoint ---
-  if (pathname === "/ws") {
-    const { response, socket } = Deno.upgradeWebSocket(req);
-    socket.onopen = () => console.log("✅ WebSocket connected");
+  socket.onmessage = (e) => {
+    try {
+      const data = JSON.parse(e.data);
 
-    socket.onmessage = (e) => {
-      try {
-        const data = JSON.parse(e.data);
-        handleSocketMessage(socket, data);
-      } catch {
-        console.error("Invalid WS message");
+      if (data.type === "join") {
+        const uid = data.uid;
+        currentUser = { uid, ws: socket, avatar: data.avatar, name: data.name };
+        
+        // Match user automatically
+        if (waitingUsers.length > 0) {
+          const peer = waitingUsers.shift()!;
+          const room = `room_${crypto.randomUUID()}`;
+          rooms[room] = [currentUser, peer];
+          currentRoom = room;
+
+          // Notify both users
+          currentUser.ws.send(JSON.stringify({ type: "matched", room, peer: { uid: peer.uid, avatar: peer.avatar, name: peer.name } }));
+          peer.ws.send(JSON.stringify({ type: "matched", room, peer: { uid: currentUser.uid, avatar: currentUser.avatar, name: currentUser.name } }));
+        } else {
+          waitingUsers.push(currentUser);
+          currentUser.ws.send(JSON.stringify({ type: "waiting" }));
+        }
       }
-    };
 
-    socket.onclose = () => handleDisconnect(socket);
-    return response;
-  }
+      // WebRTC signaling
+      if (data.type === "signal" && currentRoom) {
+        const peers = rooms[currentRoom];
+        peers.forEach((u) => {
+          if (u.uid !== currentUser!.uid) {
+            u.ws.send(JSON.stringify({ ...data, from: currentUser!.uid }));
+          }
+        });
+      }
 
-  // --- REST: /ping ---
-  if (pathname === "/ping") {
-    const sessionId = searchParams.get("sessionId");
-    const deviceId = searchParams.get("deviceId");
-    if (!sessionId || !deviceId) {
-      return Response.json({ ok: false }, { headers: corsHeaders });
+      // Video request
+      if (data.type === "video-request" && currentRoom) {
+        const peers = rooms[currentRoom];
+        peers.forEach((u) => {
+          if (u.uid !== currentUser!.uid) {
+            u.ws.send(JSON.stringify({ type: "video-request", from: currentUser!.uid }));
+          }
+        });
+      }
+
+      // Change user
+      if (data.type === "change-user") {
+        // Remove from waiting
+        const idx = waitingUsers.findIndex(u => u.uid === currentUser!.uid);
+        if (idx !== -1) waitingUsers.splice(idx,1);
+        // Disconnect current
+        currentUser!.ws.close();
+      }
+
+    } catch(err) {
+      console.error(err);
     }
+  };
 
-    const now = Date.now();
-    if (!sessions.has(sessionId)) sessions.set(sessionId, new Map());
-    const devices = sessions.get(sessionId)!;
-    devices.set(deviceId, now);
-
-    for (const [d, last] of devices.entries()) {
-      if (now - last > 15000) devices.delete(d);
+  socket.onclose = () => {
+    console.log("Client disconnected");
+    // Remove from waiting
+    if(currentUser){
+      const idx = waitingUsers.findIndex(u => u.uid === currentUser!.uid);
+      if(idx!==-1) waitingUsers.splice(idx,1);
     }
+  };
 
-    return Response.json(
-      { ok: true, onlineCount: devices.size },
-      { headers: corsHeaders }
-    );
-  }
-
-  // --- REST: /status ---
-  if (pathname === "/status") {
-    const out: Record<string, string[]> = {};
-    for (const [sid, devices] of sessions.entries()) {
-      out[sid] = Array.from(devices.keys());
-    }
-    return Response.json(out, { headers: corsHeaders });
-  }
-
-  // --- Default ---
-  return new Response("🌐 Deno WebRTC signaling server online", {
-    headers: corsHeaders,
-  });
-});
-
-// ========== WebSocket Logic ==========
-function handleSocketMessage(socket: WebSocket, data: any) {
-  const { type, roomID, payload } = data;
-
-  switch (type) {
-    case "join-room":
-      if (!rooms.has(roomID)) rooms.set(roomID, new Set());
-      rooms.get(roomID)!.add(socket);
-      console.log(`User joined room: ${roomID}`);
-      break;
-
-    case "offer":
-    case "answer":
-    case "candidate":
-    case "call-request":
-    case "call-accepted":
-    case "call-rejected":
-    case "end-call":
-      broadcast(roomID, data, socket);
-      break;
-  }
-}
-
-function handleDisconnect(socket: WebSocket) {
-  for (const [roomID, clients] of rooms.entries()) {
-    if (clients.has(socket)) {
-      clients.delete(socket);
-      broadcast(roomID, { type: "end-call" }, socket);
-    }
-  }
-}
-
-function broadcast(roomID: string, message: any, sender?: WebSocket) {
-  const clients = rooms.get(roomID);
-  if (!clients) return;
-  for (const client of clients) {
-    if (client !== sender) client.send(JSON.stringify(message));
-  }
-}
+  return response;
+}, { port: 8080 });
