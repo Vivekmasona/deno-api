@@ -7,48 +7,39 @@ function cleanText(s: string) {
   return s.replace(/<[^>]*>/g, "").replace(/\s+/g, " ").trim();
 }
 
-// Fetch top DuckDuckGo result
+// Fetch top Bing search result and extract article summary
 async function fetchTopArticleSummary(query: string): Promise<string> {
   try {
-    const searchUrl = `https://html.duckduckgo.com/html?q=${encodeURIComponent(query)}`;
+    const searchUrl = `https://www.bing.com/search?q=${encodeURIComponent(query)}`;
     const res = await fetch(searchUrl, { headers: { "User-Agent": "Mozilla/5.0" } });
     const html = await res.text();
 
-    // Get top link
-    const regex = /<a[^>]+class="result__a"[^>]*href="([^"]+)"/i;
+    // Extract first result link
+    const regex = /<li class="b_algo">.*?<a href="([^"]+)"[^>]*>/i;
     const match = regex.exec(html);
     if (!match) return "Sorry, no answer found.";
 
-    let link = match[1];
-    if (link.includes("uddg=")) {
-      try {
-        const u = new URL("https://duckduckgo.com" + link);
-        const encoded = u.searchParams.get("uddg");
-        if (encoded) link = decodeURIComponent(encoded);
-      } catch {}
-    }
+    const link = match[1];
 
     // Fetch top article content
     const pageRes = await fetch(link, { headers: { "User-Agent": "Mozilla/5.0" } });
     const pageHtml = await pageRes.text();
 
-    // Extract meaningful paragraphs
     const paragraphs = Array.from(pageHtml.matchAll(/<p>(.*?)<\/p>/gi))
       .map(p => cleanText(p[1]))
-      .filter(p => p.split(" ").length > 20)
+      .filter(p => p.split(" ").length > 20) // meaningful paragraphs
       .slice(0, 3); // top 3 paragraphs
 
     if (paragraphs.length === 0) return "Sorry, no answer found.";
 
-    // Concise single paragraph AI-style
-    const summary = paragraphs.join(" ").slice(0, 800); // limit chars for readability
-    return summary;
+    // Concise single paragraph
+    return paragraphs.join(" ").slice(0, 1000); // limit characters
   } catch {
     return "Sorry, no answer found.";
   }
 }
 
-console.log(`Google AI-style QA server running on http://localhost:${PORT}`);
+console.log(`Top-article QA server (Bing) running on http://localhost:${PORT}`);
 
 serve(async (req) => {
   const { pathname, searchParams } = new URL(req.url);
