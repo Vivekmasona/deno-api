@@ -4,7 +4,7 @@ const PORT = Number(Deno.env.get("PORT")) || 8000;
 
 interface Result {
   title: string;
-  url: string;
+  url: string | null;
   summary?: string;
   score?: number;
 }
@@ -14,7 +14,7 @@ function cleanText(s: string) {
   return s.replace(/<[^>]*>/g, "").replace(/\s+/g, " ").trim();
 }
 
-// Simple relevance scoring: query words in title/URL
+// Relevance scoring
 function relevanceScore(title: string, url: string, query: string): number {
   const qWords = query.toLowerCase().split(/\s+/);
   let score = 0;
@@ -27,7 +27,24 @@ function relevanceScore(title: string, url: string, query: string): number {
   return score;
 }
 
-// Fetch DuckDuckGo top results (max 15)
+// Detect math query
+function isMathQuery(q: string): boolean {
+  return /^[0-9+\-×x*/÷%^().\s]+$/.test(q.replace(/\s+/g, ""));
+}
+
+// Compute math safely
+function computeMath(q: string): string {
+  try {
+    let expr = q.replace(/÷/g, "/").replace(/[×x]/gi, "*");
+    // eslint-disable-next-line no-eval
+    const result = eval(expr);
+    return result.toString();
+  } catch {
+    return "Error computing expression";
+  }
+}
+
+// Fetch DuckDuckGo top results
 async function fetchDuckResults(query: string, max = 15): Promise<Result[]> {
   const url = `https://html.duckduckgo.com/html?q=${encodeURIComponent(query)}`;
   const res = await fetch(url, { headers: { "User-Agent": "Mozilla/5.0" } });
@@ -40,7 +57,6 @@ async function fetchDuckResults(query: string, max = 15): Promise<Result[]> {
     let link = match[1];
     let title = cleanText(match[2]);
 
-    // Handle DuckDuckGo uddg redirect
     if (link.includes("uddg=")) {
       try {
         const u = new URL("https://duckduckgo.com" + link);
@@ -54,16 +70,16 @@ async function fetchDuckResults(query: string, max = 15): Promise<Result[]> {
   return results;
 }
 
-// Fetch page summary (first 3 paragraphs with >20 words)
-async function fetchSummary(url: string): Promise<string | undefined> {
+// Fetch top summary from page
+async function fetchTopSummary(url: string): Promise<string | undefined> {
   try {
     const res = await fetch(url, { headers: { "User-Agent": "Mozilla/5.0" } });
     const html = await res.text();
 
     const paragraphs = Array.from(html.matchAll(/<p>(.*?)<\/p>/gi))
       .map(p => cleanText(p[1]))
-      .filter(p => p.split(" ").length > 10)
-      .slice(0, 3);
+      .filter(p => p.split(" ").length > 15)
+      .slice(0, 5);
 
     if (paragraphs.length === 0) return undefined;
     return paragraphs.join(" ");
@@ -72,7 +88,7 @@ async function fetchSummary(url: string): Promise<string | undefined> {
   }
 }
 
-console.log(`Internet Question-Answer JSON server running on http://localhost:${PORT}`);
+console.log(`Ultimate Universal QA server running on http://localhost:${PORT}`);
 
 serve(async (req) => {
   const { pathname, searchParams } = new URL(req.url);
@@ -84,28 +100,43 @@ serve(async (req) => {
     }
 
     try {
+      // If math query → compute directly
+      if (isMathQuery(query)) {
+        const answer: Result = {
+          title: "Calculation Result",
+          url: null,
+          summary: `${query} = ${computeMath(query)}`,
+          score: 100
+        };
+
+        const other_results = await fetchDuckResults(query, 5);
+
+        return new Response(JSON.stringify({ query, answer, other_results }, null, 2), {
+          headers: { "Content-Type": "application/json" }
+        });
+      }
+
+      // Non-math → general QA
       let results = await fetchDuckResults(query, 15);
       if (results.length === 0) {
         return new Response(JSON.stringify({ query, answer: null, other_results: [] }), { headers: { "Content-Type": "application/json" } });
       }
 
-      // Compute relevance scores
-      for (const r of results) r.score = relevanceScore(r.title, r.url, query);
-
-      // Sort descending by score
+      // Compute relevance
+      for (const r of results) r.score = relevanceScore(r.title, r.url || "", query);
       results.sort((a, b) => (b.score || 0) - (a.score || 0));
 
-      // Try to find top answer with meaningful summary
+      // Fetch top summary
       let top_answer: Result | null = null;
       for (const r of results) {
-        const summary = await fetchSummary(r.url);
+        if (!r.url) continue;
+        const summary = await fetchTopSummary(r.url);
         if (summary && summary.split(" ").length > 20) {
           top_answer = { ...r, summary };
           break;
         }
       }
 
-      // If no good summary, fallback to first result
       if (!top_answer) top_answer = results[0];
 
       const other_results = results.filter(r => r.url !== top_answer.url).slice(0, 10);
