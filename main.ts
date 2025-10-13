@@ -1,70 +1,142 @@
-import { serve } from "https://deno.land/std@0.203.0/http/server.ts";
-import { createCanvas, loadImage } from "https://deno.land/x/canvas@1.4.1/mod.ts";
+import { Application, Router, send } from "https://deno.land/x/oak@v13.3.2/mod.ts";
+import { DOMParser, Element } from "https://deno.land/x/deno_dom/deno-dom-wasm.ts";
 
-const BOT_TOKEN = "8149225352:AAF8pkM10sed_Yzkxz51gfyszDcQuXV1mgg";
-const SVN_API_BASE = "https://svn-vivekfy.vercel.app/search/songs?query=";
+// Helper to escape HTML
+function escapeHtml(s: string) {
+  return s.replace(/&/g, "&amp;")
+          .replace(/</g, "&lt;")
+          .replace(/>/g, "&gt;")
+          .replace(/"/g, "&quot;");
+}
 
-serve(async (req) => {
-  const url = new URL(req.url);
+// Function to get first result URL from DuckDuckGo HTML
+async function getFirstResultUrl(query: string): Promise<string | null> {
+  const ddgUrl = `https://html.duckduckgo.com/html?q=${encodeURIComponent(query)}`;
+  const res = await fetch(ddgUrl, { headers: { "User-Agent": "Mozilla/5.0" } });
+  const text = await res.text();
 
-  // Proxy to generate poster with Vivek watermark
-  if (url.pathname.startsWith("/poster")) {
-    const imageUrl = url.searchParams.get("url");
-    if (!imageUrl) return new Response("No image url", { status: 400 });
+  const doc = new DOMParser().parseFromString(text, "text/html");
+  if (!doc) return null;
 
-    const img = await loadImage(imageUrl);
-    const canvas = createCanvas(img.width, img.height);
-    const ctx = canvas.getContext("2d");
+  // Try common selector
+  let link: string | null = null;
+  const a1 = doc.querySelector("a.result__a") as Element | null;
+  if (a1 && a1.getAttribute("href")) link = a1.getAttribute("href");
 
-    ctx.drawImage(img, 0, 0, img.width, img.height);
-
-    // Add watermark Vivek
-    ctx.font = `${Math.floor(img.height / 10)}px Arial`;
-    ctx.fillStyle = "rgba(231,76,60,0.6)";
-    ctx.textAlign = "center";
-    ctx.fillText("Vivek", img.width / 2, img.height / 2);
-
-    const png = canvas.toBuffer("image/png");
-    return new Response(png, { headers: { "Content-Type": "image/png" } });
+  if (!link) {
+    const a2 = doc.querySelector(".result a") as Element | null;
+    if (a2 && a2.getAttribute("href")) link = a2.getAttribute("href");
   }
 
-  // Telegram webhook
-  if (req.method === "POST") {
-    const body = await req.json().catch(() => ({}));
-    const chat_id = body.message?.chat?.id;
-    const text = body.message?.text?.trim();
-    if (!chat_id || !text) return new Response("ok", { status: 200 });
+  // Check for uddg param (redirect)
+  if (link && link.includes("uddg=")) {
+    try {
+      const url = new URL("https://duckduckgo.com" + link);
+      const u = url.searchParams.get("uddg");
+      if (u) link = decodeURIComponent(u);
+    } catch {}
+  }
 
-    // Fetch top song from SVN API
-    const apiRes = await fetch(SVN_API_BASE + encodeURIComponent(text));
-    const data = await apiRes.json().catch(() => null);
-    const song = data?.data?.results?.[0];
-    if (!song) {
-      await fetch(`https://api.telegram.org/bot${BOT_TOKEN}/sendMessage`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ chat_id, text: "❌ No song found!" }),
-      });
-      return new Response("ok");
+  if (link && link.startsWith("/")) link = "https://duckduckgo.com" + link;
+  if (!link || !/^https?:\/\//i.test(link)) return null;
+  return link;
+}
+
+const app = new Application();
+const router = new Router();
+
+router
+  .get("/", (ctx) => {
+    ctx.response.body = `
+      <html>
+        <head><meta charset="utf-8"><title>Deno Mini Browser</title></head>
+        <body style="font-family:system-ui;padding:20px">
+          <h2>Type a name / search term</h2>
+          <form method="POST" action="/search">
+            <input name="q" placeholder="Search term" style="width:60%;padding:8px" required>
+            <select name="mode" style="padding:8px">
+              <option value="link">Show extracted URL only</option>
+              <option value="proxy">Show proxied page content</option>
+            </select>
+            <button type="submit" style="padding:8px 12px">Search</button>
+          </form>
+        </body>
+      </html>
+    `;
+  })
+
+  .post("/search", async (ctx) => {
+    const body = ctx.request.body({ type: "form" });
+    const value = await body.value;
+    const q = value.get("q")?.trim() || "";
+    const mode = value.get("mode") || "link";
+
+    if (!q) {
+      ctx.response.body = "Please provide a search term.";
+      return;
     }
 
-    // Poster proxy
-    const posterProxy = `${url.origin}/poster?url=${encodeURIComponent(song.image[2]?.link)}`;
+    try {
+      const firstUrl = await getFirstResultUrl(q);
+      if (!firstUrl) {
+        ctx.response.body = `<p>No result found for <b>${escapeHtml(q)}</b>.</p><p><a href="/">Back</a></p>`;
+        return;
+      }
 
-    // Send downloadable audio
-    await fetch(`https://api.telegram.org/bot${BOT_TOKEN}/sendAudio`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
-        chat_id,
-        audio: song.downloadUrl[1]?.link, // Direct download link from SVN API
-        caption: `🎵 ${song.name}\n👤 ${song.primaryArtists || "Unknown"}`,
-        thumb: posterProxy,
-      }),
-    });
+      if (mode === "link") {
+        ctx.response.body = `
+          <html><head><meta charset="utf-8"><title>Result for ${escapeHtml(q)}</title></head>
+          <body style="font-family:system-ui;padding:20px">
+            <h3>Top result for: ${escapeHtml(q)}</h3>
+            <p><a href="${escapeHtml(firstUrl)}" target="_blank">${escapeHtml(firstUrl)}</a></p>
+            <p><a href="/proxy?url=${encodeURIComponent(firstUrl)}" target="_blank">Open proxied</a></p>
+            <p style="margin-top:18px"><a href="/">New search</a></p>
+          </body></html>
+        `;
+      } else {
+        // Proxy mode: fetch page content
+        try {
+          const pageResp = await fetch(firstUrl, { headers: { "User-Agent": "Mozilla/5.0" } });
+          const pageHtml = await pageResp.text();
+          ctx.response.body = `
+            <html>
+              <head><meta charset="utf-8"><title>Proxied: ${escapeHtml(q)}</title></head>
+              <body>
+                <div style="padding:10px;background:#eee;border-bottom:1px solid #ccc">
+                  <b>Search:</b> ${escapeHtml(q)} | <b>URL:</b> <a href="${escapeHtml(firstUrl)}" target="_blank">${escapeHtml(firstUrl)}</a>
+                  &nbsp;|&nbsp; <a href="/">New search</a>
+                </div>
+                <div style="padding:12px">
+                  ${pageHtml}
+                </div>
+              </body>
+            </html>
+          `;
+        } catch (err) {
+          ctx.response.body = `<p>Failed to fetch page: ${escapeHtml(err.message)}</p><p><a href="/">Back</a></p>`;
+        }
+      }
+    } catch (err) {
+      ctx.response.body = `<p>Error: ${escapeHtml(err.message)}</p><p><a href="/">Back</a></p>`;
+    }
+  })
 
-    return new Response("ok", { status: 200 });
-  }
+  .get("/proxy", async (ctx) => {
+    const url = ctx.request.url.searchParams.get("url");
+    if (!url) {
+      ctx.response.body = "Missing url parameter.";
+      return;
+    }
+    try {
+      const pageResp = await fetch(url, { headers: { "User-Agent": "Mozilla/5.0" } });
+      ctx.response.body = await pageResp.text();
+    } catch (err) {
+      ctx.response.body = `Failed to fetch: ${escapeHtml(err.message)}`;
+    }
+  });
 
-  return new Response("Bot running", { status: 200 });
-});
+app.use(router.routes());
+app.use(router.allowedMethods());
+
+console.log("Deno mini-browser running on http://localhost:8000");
+await app.listen({ port: 8000 });
