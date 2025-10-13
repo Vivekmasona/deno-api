@@ -9,21 +9,17 @@ interface User {
   name: string;
 }
 
-const waitingUsers: User[] = [];
+const onlineUsers: User[] = [];
 const rooms: Record<string, User[]> = {};
 
-console.log("Deno call server running on :8080");
+console.log("Deno WebRTC Call Server running on :8080");
 
-serve(async (req) => {
+serve((req) => {
   const url = new URL(req.url);
   if (url.pathname === "/") {
-    // Serve frontend HTML
-    return new Response(frontendHTML, {
-      headers: { "content-type": "text/html; charset=utf-8" },
-    });
+    return new Response(frontendHTML, { headers: { "content-type": "text/html; charset=utf-8" } });
   }
 
-  // Upgrade WebSocket
   if (url.pathname === "/ws") {
     const { socket, response } = Deno.upgradeWebSocket(req);
     let currentUser: User | null = null;
@@ -38,19 +34,7 @@ serve(async (req) => {
         if (data.type === "join") {
           const uid = data.uid;
           currentUser = { uid, ws: socket, avatar: data.avatar, name: data.name };
-          // Match user automatically
-          if (waitingUsers.length > 0) {
-            const peer = waitingUsers.shift()!;
-            const room = `room_${crypto.randomUUID()}`;
-            rooms[room] = [currentUser, peer];
-            currentRoom = room;
-            // Notify both
-            currentUser.ws.send(JSON.stringify({ type: "matched", room, peer: { uid: peer.uid, avatar: peer.avatar, name: peer.name } }));
-            peer.ws.send(JSON.stringify({ type: "matched", room, peer: { uid: currentUser.uid, avatar: currentUser.avatar, name: currentUser.name } }));
-          } else {
-            waitingUsers.push(currentUser);
-            currentUser.ws.send(JSON.stringify({ type: "waiting" }));
-          }
+          onlineUsers.push(currentUser);
         }
 
         // WebRTC signaling
@@ -75,22 +59,25 @@ serve(async (req) => {
 
         // Change user
         if (data.type === "change-user") {
-          const idx = waitingUsers.findIndex(u => u.uid === currentUser!.uid);
-          if (idx !== -1) waitingUsers.splice(idx,1);
+          const idx = onlineUsers.findIndex(u => u.uid === currentUser!.uid);
+          if (idx !== -1) onlineUsers.splice(idx,1);
           socket.close();
         }
 
-      } catch(err) {
-        console.error(err);
-      }
+      } catch(err) { console.error(err); }
     };
 
     socket.onclose = () => {
-      console.log("Client disconnected");
       if(currentUser){
-        const idx = waitingUsers.findIndex(u => u.uid === currentUser!.uid);
-        if(idx!==-1) waitingUsers.splice(idx,1);
+        const idx = onlineUsers.findIndex(u => u.uid === currentUser!.uid);
+        if(idx!==-1) onlineUsers.splice(idx,1);
+        // Remove from any room
+        for(const room in rooms){
+          rooms[room] = rooms[room].filter(u => u.uid !== currentUser!.uid);
+          if(rooms[room].length === 0) delete rooms[room];
+        }
       }
+      console.log("Client disconnected");
     };
 
     return response;
@@ -98,6 +85,19 @@ serve(async (req) => {
 
   return new Response("Not Found", { status: 404 });
 }, { port: 8080 });
+
+// ----- Auto Pairing every 5 seconds -----
+setInterval(() => {
+  while(onlineUsers.length >= 2){
+    const a = onlineUsers.shift()!;
+    const b = onlineUsers.shift()!;
+    const room = `room_${crypto.randomUUID()}`;
+    rooms[room] = [a,b];
+
+    a.ws.send(JSON.stringify({ type:"matched", room, peer:{uid:b.uid, avatar:b.avatar, name:b.name} }));
+    b.ws.send(JSON.stringify({ type:"matched", room, peer:{uid:a.uid, avatar:a.avatar, name:a.name} }));
+  }
+}, 5000);
 
 const frontendHTML = `
 <!DOCTYPE html>
