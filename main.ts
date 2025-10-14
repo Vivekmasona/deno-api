@@ -1,4 +1,4 @@
-// deno_ytdl.ts
+// deno_ytdl_playable.ts
 // Usage: https://your-deno-deploy-url/ytdl?url=https://youtu.be/FkFvdukWpAI
 
 Deno.serve(async (req) => {
@@ -7,7 +7,7 @@ Deno.serve(async (req) => {
   if (pathname === "/") {
     return json({
       status: "success",
-      message: "🦕 Deno YouTube Extractor Running!\nUse /ytdl?url=..."
+      message: "🦕 Deno YouTube Playable Extractor Running!\nUse /ytdl?url=..."
     });
   }
 
@@ -51,8 +51,10 @@ Deno.serve(async (req) => {
         needsDecipher: !!(f.signatureCipher || f.cipher),
       }));
 
-      const audioFormats = allFormats.filter(f => f.mimeType.includes("audio"));
-      const videoFormats = allFormats.filter(f => f.mimeType.includes("video"));
+      // **Filter only playable URLs**
+      const playableFormats = allFormats.filter(f => !f.needsDecipher && f.url);
+      const audioFormats = playableFormats.filter(f => f.mimeType.includes("audio"));
+      const videoFormats = playableFormats.filter(f => f.mimeType.includes("video"));
 
       return json({
         status: "success",
@@ -61,7 +63,7 @@ Deno.serve(async (req) => {
         author: videoDetails.author || "",
         durationSeconds: parseInt(videoDetails.lengthSeconds || "0", 10),
         thumbnails: videoDetails.thumbnail?.thumbnails || [],
-        formats: allFormats,
+        formats: playableFormats,
         audioFormats,
         videoFormats,
       });
