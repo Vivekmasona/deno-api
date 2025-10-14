@@ -1,50 +1,53 @@
-// main.ts — Deno version (no npm, fully native)
-// Run with: deno run --allow-net --allow-env main.ts
+// main.ts — Deno native YouTube extractor + proxy
+// Run: deno run --allow-net --allow-env main.ts
 // Example:
-//   1️⃣ Get all formats:   https://yourdomain.com/formats?url=https://youtu.be/FkFvdukWpAI
-//   2️⃣ Stream proxy:      https://yourdomain.com/stream?url=<encoded_googlevideo_url>
+//   /formats?url=https://youtu.be/FkFvdukWpAI
+//   /stream?url=<encoded_googlevideo_url>
 
+import { Innertube } from "npm:youtubei.js";
 import { serve } from "https://deno.land/std@0.224.0/http/server.ts";
 
-async function getYouTubeFormats(videoUrl: string) {
-  const api = `https://ytstream-download-youtube-videos.p.rapidapi.com/dl?id=${extractVideoId(videoUrl)}`;
-  const headers = {
-    "X-RapidAPI-Key": "f2e9e4d8a9msh98b3a55d5fb9c23p19d845jsn5e9bdf27b507", // <-- demo key, replace with your own if needed
-    "X-RapidAPI-Host": "ytstream-download-youtube-videos.p.rapidapi.com",
-  };
-
-  const res = await fetch(api, { headers });
-  if (!res.ok) throw new Error("Failed to fetch formats");
-  const data = await res.json();
-
-  // Combine all formats
-  const allFormats = [
-    ...(data.formats || []),
-    ...(data.adaptiveFormats || []),
-  ];
-
-  return allFormats.map((f: any) => ({
-    itag: f.itag,
-    qualityLabel: f.qualityLabel || null,
-    mimeType: f.mimeType,
-    bitrate: f.bitrate,
-    audioBitrate: f.audioBitrate || null,
-    contentLength: f.contentLength,
-    url: f.url,
-  }));
+// YouTube internal API client
+let yt: Innertube | null = null;
+async function getClient() {
+  if (!yt) yt = await Innertube.create();
+  return yt;
 }
 
+// Extract YouTube video ID
 function extractVideoId(url: string): string {
   const match = url.match(/(?:v=|\.be\/)([a-zA-Z0-9_-]{11})/);
   return match ? match[1] : url;
 }
 
+// Get all formats (itag, url, bitrate, qualityLabel...)
+async function getFormats(videoUrl: string) {
+  const client = await getClient();
+  const id = extractVideoId(videoUrl);
+  const info = await client.getInfo(id);
+
+  const all = [
+    ...info.streaming_data?.formats || [],
+    ...info.streaming_data?.adaptive_formats || [],
+  ];
+
+  return all.map((f: any) => ({
+    itag: f.itag,
+    mimeType: f.mime_type,
+    qualityLabel: f.quality_label || null,
+    bitrate: f.bitrate,
+    audioBitrate: f.audio_bitrate || null,
+    contentLength: f.content_length,
+    url: f.decipher(client.session.player) // resolve signature
+  }));
+}
+
+// Stream proxy (403 safe)
 async function handleStream(req: Request) {
   const { searchParams } = new URL(req.url);
   const target = searchParams.get("url");
   if (!target) return new Response("Missing ?url", { status: 400 });
 
-  // Proxy request to bypass 403
   const ytRes = await fetch(target, {
     headers: {
       "User-Agent":
@@ -54,10 +57,6 @@ async function handleStream(req: Request) {
       "Range": req.headers.get("Range") || undefined,
     },
   });
-
-  if (!ytRes.ok) {
-    return new Response("Upstream fetch failed", { status: ytRes.status });
-  }
 
   const headers = new Headers(ytRes.headers);
   headers.set("Access-Control-Allow-Origin", "*");
@@ -69,6 +68,7 @@ async function handleStream(req: Request) {
   });
 }
 
+// Server routes
 serve(async (req) => {
   const { pathname, searchParams } = new URL(req.url);
 
@@ -77,11 +77,12 @@ serve(async (req) => {
     if (!url) return new Response("Missing ?url", { status: 400 });
 
     try {
-      const formats = await getYouTubeFormats(url);
+      const formats = await getFormats(url);
       return new Response(JSON.stringify({ videoFormats: formats }, null, 2), {
         headers: { "Content-Type": "application/json" },
       });
     } catch (err) {
+      console.error(err);
       return new Response(JSON.stringify({ error: err.message }), {
         status: 500,
         headers: { "Content-Type": "application/json" },
@@ -89,14 +90,12 @@ serve(async (req) => {
     }
   }
 
-  if (pathname === "/stream") {
-    return handleStream(req);
-  }
+  if (pathname === "/stream") return handleStream(req);
 
   return new Response(
-    `✅ Deno YouTube API running!
-Use /formats?url=... to list formats
-Use /stream?url=... to proxy stream`,
+    `✅ Deno YouTube Extractor Running!
+Use /formats?url=... to list all itags.
+Use /stream?url=... to proxy playback.`,
     { headers: { "Content-Type": "text/plain" } },
   );
 });
