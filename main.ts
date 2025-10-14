@@ -1,63 +1,68 @@
 // main.ts
-// Deno + yt-dlp YouTube Extractor & Streamer
-// Run: deno run --allow-net --allow-run main.ts
+// Deno Deploy compatible YouTube formats extractor
+// Run: deno deploy or deno run --allow-net main.ts
 
-import { serve } from "https://deno.land/std@0.224.0/http/server.ts";
-
-serve(async (req) => {
+Deno.serve(async (req) => {
   const urlObj = new URL(req.url);
   const pathname = urlObj.pathname;
 
   if (pathname === "/") {
-    return text("Deno YouTube Server\n/formats?url=...\n/stream?video=...&itag=...");
+    return text("Deno YouTube Extractor\n/formats?url=...");
   }
 
   if (pathname === "/formats") {
-    const video = urlObj.searchParams.get("url");
-    if (!video) return jsonError("Missing ?url=");
+    const videoUrl = urlObj.searchParams.get("url");
+    if (!videoUrl) return jsonError("Missing ?url=");
+
     try {
-      // Call yt-dlp to get formats as JSON
-      const process = Deno.run({
-        cmd: ["yt-dlp", "-J", video],
-        stdout: "piped",
-        stderr: "piped",
-      });
+      // Fetch YouTube page
+      const res = await fetch(videoUrl, { headers: { "User-Agent": "Mozilla/5.0" } });
+      const html = await res.text();
 
-      const output = await process.output();
-      const decoder = new TextDecoder();
-      const jsonStr = decoder.decode(output);
+      // Extract player JSON
+      const match = html.match(/ytInitialPlayerResponse\s*=\s*(\{.+?\});/s);
+      if (!match) return jsonError("Could not extract player JSON");
 
-      await process.status(); // wait exit
-      return new Response(jsonStr, { headers: { "content-type": "application/json" } });
-    } catch (e) {
-      return jsonError(String(e));
-    }
-  }
+      const player = JSON.parse(match[1]);
+      const videoDetails = player.videoDetails || {};
+      const streamingData = player.streamingData || {};
+      const formats = streamingData.formats || [];
+      const adaptive = streamingData.adaptiveFormats || [];
 
-  if (pathname === "/stream") {
-    const video = urlObj.searchParams.get("video");
-    const itag = urlObj.searchParams.get("itag");
-    if (!video || !itag) return jsonError("Missing ?video= or &itag=");
-    try {
-      // Range headers support
-      const range = req.headers.get("range");
-      const headers: HeadersInit = { "User-Agent": "Mozilla/5.0" };
-      if (range) headers["Range"] = range;
+      // Decode cipher URLs
+      function getUrl(f: any) {
+        if (f.url) return f.url;
+        const cipher = f.signatureCipher || f.cipher;
+        if (!cipher) return null;
+        const params = new URLSearchParams(cipher);
+        return params.get("url") || null;
+      }
 
-      // yt-dlp stream to stdout
-      const process = Deno.run({
-        cmd: ["yt-dlp", "-f", itag, "-o", "-", video],
-        stdout: "piped",
-        stderr: "piped",
-      });
+      const allFormats = [...formats, ...adaptive].map((f: any) => ({
+        itag: f.itag,
+        mimeType: f.mimeType,
+        qualityLabel: f.qualityLabel || f.audioQuality || "N/A",
+        bitrate: f.bitrate || 0,
+        audioBitrate: f.audioBitrate || null,
+        contentLength: f.contentLength || null,
+        url: getUrl(f),
+      }));
 
-      // Return streamed response
-      return new Response(process.stdout, {
-        headers: {
-          "content-type": "video/mp4", // generic, yt-dlp sends correct content
-          "Access-Control-Allow-Origin": "*",
-          "Access-Control-Expose-Headers": "*",
-        },
+      const audioFormats = allFormats.filter(f => f.mimeType?.includes("audio"));
+      const videoFormats = allFormats.filter(f => f.mimeType?.includes("video"));
+
+      return json({
+        status: "success",
+        title: videoDetails.title || "Unknown",
+        videoId: videoDetails.videoId || "",
+        author: videoDetails.author || "",
+        channelId: videoDetails.channelId || "",
+        durationSeconds: parseInt(videoDetails.lengthSeconds || "0", 10),
+        thumbnails: videoDetails.thumbnail?.thumbnails || [],
+        total: allFormats.length,
+        formats: allFormats,
+        audioFormats,
+        videoFormats,
       });
 
     } catch (e) {
