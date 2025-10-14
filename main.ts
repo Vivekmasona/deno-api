@@ -1,26 +1,51 @@
-// stream-proxy.ts (Deno)
-import { serve } from "https://deno.land/std@0.224.0/http/server.ts";
+// main.ts
+// Deno YouTube Stream Server
+// Usage: /stream?url=<youtube_url>
+
+import { serve } from "https://deno.land/std@0.203.0/http/server.ts";
+
 serve(async (req) => {
-  const u = new URL(req.url);
-  if (u.pathname !== "/stream") return new Response("Not Found", { status: 404 });
-  const target = u.searchParams.get("url");
-  if (!target) return new Response("Missing ?url", { status: 400 });
+  const url = new URL(req.url);
+  const pathname = url.pathname;
 
-  const forward: Record<string,string> = {
-    "User-Agent": req.headers.get("user-agent") ?? "Mozilla/5.0",
-    "Referer": "https://www.youtube.com/",
-  };
-  const range = req.headers.get("range");
-  if (range) forward["Range"] = range;
-
-  const upstream = await fetch(target, { headers: forward });
-  if (!upstream.ok) {
-    const txt = await upstream.text().catch(()=>"");
-    return new Response(JSON.stringify({ status:"error", upstreamStatus: upstream.status, snippet: txt.slice(0,300) }, null, 2), { status: 502, headers:{ "content-type":"application/json" }});
+  if (pathname === "/") {
+    return json({ status: "success", message: "Deno YouTube Stream Running! Use /stream?url=..." });
   }
 
-  const headers = new Headers(upstream.headers);
-  headers.set("Access-Control-Allow-Origin", "*");
-  headers.set("Access-Control-Expose-Headers", "*");
-  return new Response(upstream.body, { status: upstream.status, headers });
+  if (pathname === "/stream") {
+    const ytUrl = url.searchParams.get("url");
+    if (!ytUrl) return error("Missing ?url= parameter");
+
+    try {
+      // Run yt-dlp to get direct video URL
+      const p = Deno.run({
+        cmd: ["yt-dlp", "-f", "best", "-g", ytUrl],
+        stdout: "piped",
+        stderr: "piped",
+      });
+
+      const output = new TextDecoder().decode(await p.output());
+      const errOutput = new TextDecoder().decode(await p.stderrOutput());
+      p.close();
+
+      if (errOutput) return error("yt-dlp error: " + errOutput.trim());
+      const videoUrl = output.trim();
+      if (!videoUrl) return error("Could not fetch direct video URL");
+
+      return json({ status: "success", videoUrl });
+    } catch (err) {
+      return error(err.message);
+    }
+  }
+
+  return new Response("404 Not Found", { status: 404 });
 });
+
+// ---------------- Helpers ----------------
+function json(obj: any) {
+  return new Response(JSON.stringify(obj, null, 2), { headers: { "Content-Type": "application/json" } });
+}
+
+function error(msg: string) {
+  return json({ status: "error", message: msg });
+}
