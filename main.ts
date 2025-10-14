@@ -1,67 +1,105 @@
-// Deno YouTube Opus Audio Extractor
-// Usage: http://localhost:8000/ytdl-opus?url=https://youtu.be/FkFvdukWpAI
+// Deno YouTube extractor - improved parsing of signatureCipher/cipher
+// Usage: /ytdl?url=https://youtu.be/FkFvdukWpAI
+// NOTE: This returns parsed cipher fields. If a format has `needsDecipher: true`
+// you must implement the signature decipher (fetch player JS and apply algorithm)
+// or use an external library/server (ytdl-core, yt-dlp, etc).
 
-import { serve } from "https://deno.land/std@0.203.0/http/server.ts";
-
-serve(async (req) => {
+Deno.serve(async (req) => {
   const { pathname, searchParams } = new URL(req.url);
 
   if (pathname === "/") {
-    return json({ status: "success", message: "Deno YouTube Opus Extractor Running" });
+    return json({
+      status: "success",
+      message: "🦕 Deno YouTube Extractor Running!\nUse /ytdl?url=..."
+    });
   }
 
-  if (pathname === "/ytdl-opus") {
+  if (pathname === "/ytdl") {
     const ytUrl = searchParams.get("url");
     if (!ytUrl) return error("Missing ?url=");
 
     try {
-      const html = await (await fetch(ytUrl, { headers: { "User-Agent": "Mozilla/5.0" } })).text();
+      // fetch the video page
+      const res = await fetch(ytUrl, { headers: { "User-Agent": "Mozilla/5.0" } });
+      const html = await res.text();
 
-      // Parse player JSON
-      const match = html.match(/ytInitialPlayerResponse\s*=\s*(\{.+?\});/s);
-      if (!match) return error("Cannot parse player JSON");
+      // Try to find the ytInitialPlayerResponse JSON
+      // Note: youtube sometimes wraps differently; this regex covers common case
+      const playerMatch =
+        html.match(/ytInitialPlayerResponse\s*=\s*(\{.+?\});/s) ||
+        html.match(/window\["ytInitialPlayerResponse"\]\s*=\s*(\{.+?\});/s);
 
-      const player = JSON.parse(match[1]);
+      if (!playerMatch) return error("Could not parse player JSON");
+
+      const player = JSON.parse(playerMatch[1]);
       const videoDetails = player.videoDetails || {};
-      const adaptive = player.streamingData?.adaptiveFormats || [];
+      const streamingData = player.streamingData || {};
+      const formats = streamingData.formats || [];
+      const adaptive = streamingData.adaptiveFormats || [];
 
-      // Extract player JS URL
-      const jsUrlMatch = html.match(/"jsUrl":"(\/s\/player\/[\w\d\/\.\-_]+\.js)"/);
-      if (!jsUrlMatch) return error("Cannot find player JS URL");
+      // Helper: parse signatureCipher / cipher string into object
+      function parseCipher(cipherStr: string | undefined) {
+        if (!cipherStr) return null;
+        // some entries use "signatureCipher" or "cipher" and are URL-encoded params
+        try {
+          const params = new URLSearchParams(cipherStr);
+          const obj: Record<string, string> = {};
+          for (const [k, v] of params.entries()) obj[k] = v;
+          return obj;
+        } catch (e) {
+          return null;
+        }
+      }
 
-      const jsUrl = "https://www.youtube.com" + jsUrlMatch[1];
-      const playerJs = await (await fetch(jsUrl)).text();
+      // Build combined formats with parsed cipher info, and flag which need decipher
+      const allRaw = [...formats, ...adaptive];
+      const allFormats = allRaw.map((f: any) => {
+        const cipher = parseCipher(f.signatureCipher || f.cipher);
+        const directUrl = f.url || (cipher && cipher.url) || null;
+        // A format needs decipher if it has an 's' param (obfuscated signature)
+        const needsDecipher = !!(cipher && cipher.s);
+        // If there's a 'sig' or 'sig' style param we can append it to url
+        const hasSig = !!(cipher && (cipher.sig || cipher.s || cipher.signature));
 
-      // Create decipher function
-      const decipher = createDecipher(playerJs);
+        // Build an informative object to return
+        const out: any = {
+          itag: f.itag,
+          mimeType: f.mimeType || f.mime,
+          qualityLabel: f.qualityLabel || f.audioQuality || "N/A",
+          bitrate: f.bitrate || null,
+          audioBitrate: f.audioBitrate || null,
+          contentLength: f.contentLength || null,
+          // directUrl will be null when signature needs deciphering
+          url: directUrl,
+          parsedCipher: cipher,        // parsed query params from signatureCipher/cipher
+          needsDecipher,
+          hasSig,
+        };
 
-      // Filter Opus audio formats and decipher
-      const opusFormats = adaptive
-        .filter((f: any) => f.mimeType?.includes("audio/webm") && f.mimeType?.includes("opus"))
-        .map((f: any) => {
-          if (f.url) return f; // Already has working URL
-          const cipher = f.signatureCipher || f.cipher;
-          if (!cipher) return f;
+        return out;
+      });
 
-          const params = new URLSearchParams(cipher);
-          const url = params.get("url")!;
-          const s = params.get("s");
-          const sp = params.get("sp") || "signature";
-          const sig = s ? decipher(s) : params.get("sig");
-
-          return { ...f, url: sig ? `${url}&${sp}=${sig}` : url };
-        });
+      // Separate audio-only and video-only using mimeType when present
+      const audioFormats = allFormats.filter((f: any) => f.mimeType && f.mimeType.includes("audio"));
+      const videoFormats = allFormats.filter((f: any) => f.mimeType && f.mimeType.includes("video"));
 
       return json({
         status: "success",
-        title: videoDetails.title,
-        videoId: videoDetails.videoId,
-        author: videoDetails.author,
-        opusFormats,
+        title: videoDetails.title || "Unknown",
+        videoId: videoDetails.videoId || "",
+        author: videoDetails.author || "",
+        channelId: videoDetails.channelId || "",
+        durationSeconds: parseInt(videoDetails.lengthSeconds || "0", 10),
+        thumbnails: videoDetails.thumbnail?.thumbnails || [],
+        formats: allFormats,
+        audioFormats,
+        videoFormats,
+        note:
+          "Formats with needsDecipher=true contain an obfuscated signature (s). To get a working URL you must fetch the player JS and run the decipher algorithm on the 's' value, or use a backend tool (ytdl-core / yt-dlp) that already implements this.",
       });
 
-    } catch (e) {
-      return error(String(e));
+    } catch (err) {
+      return error(String(err?.message || err));
     }
   }
 
@@ -70,59 +108,11 @@ serve(async (req) => {
 
 // ----------------- Helper Functions -----------------
 function json(obj: any) {
-  return new Response(JSON.stringify(obj, null, 2), { headers: { "content-type": "application/json" } });
+  return new Response(JSON.stringify(obj, null, 2), {
+    headers: { "content-type": "application/json" },
+  });
 }
 
 function error(msg: string) {
   return json({ status: "error", message: msg });
-}
-
-// ----------------- YouTube Signature Decipher -----------------
-function createDecipher(jsCode: string) {
-  // Extract the main cipher function name
-  const fnNameMatch = jsCode.match(/\.sig\|\|([a-zA-Z0-9$]+)\(/);
-  if (!fnNameMatch) return (s: string) => s;
-
-  const fnName = fnNameMatch[1].replace(/\$/g, "\\$");
-
-  // Extract function body
-  const fnBodyMatch = jsCode.match(new RegExp(`${fnName}=function\\(a\\)\\{(.*?)\\}`, "s"));
-  if (!fnBodyMatch) return (s: string) => s;
-
-  const fnBody = fnBodyMatch[1];
-
-  // Extract helper object name
-  const helperNameMatch = fnBody.match(/;([a-zA-Z0-9$]{2})\./);
-  if (!helperNameMatch) return (s: string) => s;
-  const helperName = helperNameMatch[1].replace(/\$/g, "\\$");
-
-  // Extract helper object body
-  const helperBodyMatch = jsCode.match(new RegExp(`var ${helperName}=\\{(.*?)\\};`, "s"));
-  if (!helperBodyMatch) return (s: string) => s;
-  const helperBody = helperBodyMatch[1];
-
-  // Simple parser: handle common ops (reverse, slice, swap)
-  return function decipher(sig: string): string {
-    let a = sig.split("");
-
-    // Example: parse operations
-    // This is minimal and works for common current YouTube player JS
-    const ops = fnBody.split(";").filter(l => l.includes(helperName + "."));
-    for (const op of ops) {
-      if (op.includes("reverse")) a = a.reverse();
-      else if (op.includes("splice")) {
-        const nMatch = op.match(/splice\((\d+)\)/);
-        if (nMatch) a.splice(0, parseInt(nMatch[1], 10));
-      } else if (op.includes("swap")) {
-        const nMatch = op.match(/(\w+)\[0\]=\w+\[(\d+)\]/);
-        if (nMatch) {
-          const i = parseInt(nMatch[2], 10);
-          const tmp = a[0];
-          a[0] = a[i];
-          a[i] = tmp;
-        }
-      }
-    }
-    return a.join("");
-  };
 }
