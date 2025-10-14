@@ -1,86 +1,21 @@
-// main.ts
-// Deno Deploy compatible YouTube formats extractor
-Deno.serve(async (req) => {
-  const urlObj = new URL(req.url);
-  const pathname = urlObj.pathname;
+// export_cookies.ts
+import puppeteer from 'https://deno.land/x/puppeteer@v0.4.0/mod.ts';
 
-  if (pathname === "/") {
-    return text("Deno YouTube Extractor\n/formats?url=...");
-  }
+async function exportCookies() {
+  const browser = await puppeteer.launch({ headless: false });
+  const page = await browser.newPage();
+  await page.goto('https://www.youtube.com');
+  console.log('Please log in to your YouTube account.');
+  await page.waitForTimeout(30000); // Wait for 30 seconds for manual login
 
-  if (pathname === "/formats") {
-    const videoUrl = urlObj.searchParams.get("url");
-    if (!videoUrl) return jsonError("Missing ?url=");
+  const cookies = await page.cookies();
+  const cookieHeader = cookies.map(cookie => `${cookie.name}=${cookie.value}`).join('; ');
 
-    try {
-      const res = await fetch(videoUrl, { headers: { "User-Agent": "Mozilla/5.0" } });
-      const html = await res.text();
+  await Deno.writeTextFile('cookies.txt', JSON.stringify(cookies, null, 2));
+  await Deno.writeTextFile('cookie-header.txt', cookieHeader);
 
-      const match = html.match(/ytInitialPlayerResponse\s*=\s*(\{.+?\});/s);
-      if (!match) return jsonError("Could not extract player JSON");
-
-      const player = JSON.parse(match[1]);
-      const videoDetails = player.videoDetails || {};
-      const streamingData = player.streamingData || {};
-      const formats = streamingData.formats || [];
-      const adaptive = streamingData.adaptiveFormats || [];
-
-      function getUrl(f: any) {
-        if (f.url) return f.url;
-        const cipher = f.signatureCipher || f.cipher;
-        if (!cipher) return null;
-        const params = new URLSearchParams(cipher);
-        return params.get("url") || null;
-      }
-
-      const allFormats = [...formats, ...adaptive].map((f: any) => ({
-        itag: f.itag,
-        mimeType: f.mimeType,
-        qualityLabel: f.qualityLabel || f.audioQuality || "N/A",
-        bitrate: f.bitrate || 0,
-        audioBitrate: f.audioBitrate || null,
-        contentLength: f.contentLength || null,
-        url: getUrl(f),
-      }));
-
-      const audioFormats = allFormats.filter(f => f.mimeType?.includes("audio"));
-      const videoFormats = allFormats.filter(f => f.mimeType?.includes("video"));
-
-      return json({
-        status: "success",
-        title: videoDetails.title || "Unknown",
-        videoId: videoDetails.videoId || "",
-        author: videoDetails.author || "",
-        channelId: videoDetails.channelId || "",
-        durationSeconds: parseInt(videoDetails.lengthSeconds || "0", 10),
-        thumbnails: videoDetails.thumbnail?.thumbnails || [],
-        total: allFormats.length,
-        formats: allFormats,
-        audioFormats,
-        videoFormats,
-      });
-
-    } catch (e) {
-      return jsonError(String(e));
-    }
-  }
-
-  return new Response("Not Found", { status: 404 });
-});
-
-// ---------------- Helper functions ----------------
-function text(t: string) {
-  return new Response(t, { headers: { "content-type": "text/plain" } });
+  console.log('Cookies saved to cookies.txt and cookie-header.txt');
+  await browser.close();
 }
 
-function jsonError(msg: string) {
-  return new Response(JSON.stringify({ status: "error", message: msg }, null, 2), {
-    headers: { "content-type": "application/json" },
-  });
-}
-
-function json(obj: any) {
-  return new Response(JSON.stringify(obj, null, 2), {
-    headers: { "content-type": "application/json" },
-  });
-}
+exportCookies();
