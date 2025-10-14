@@ -1,84 +1,84 @@
 // main.ts
-// Deno YouTube Extractor + yt-dlp + Cookies support
-// Usage: 
-// 1. POST /upload-cookies -> multipart form-data 'file': cookies.txt
-// 2. GET /ytdl?url=https://youtu.be/VIDEOID
+// Deno Deploy compatible YouTube formats extractor
+// Run: deno deploy or deno run --allow-net main.ts
 
-import { serve } from "https://deno.land/std@0.203.0/http/server.ts";
-import { MultipartReader } from "https://deno.land/std@0.203.0/mime/multipart.ts";
-import { v4 } from "https://deno.land/std@0.203.0/uuid/mod.ts";
+Deno.serve(async (req) => {
+  const urlObj = new URL(req.url);
+  const pathname = urlObj.pathname;
 
-const COOKIE_FOLDER = "./cookies";
-await Deno.mkdir(COOKIE_FOLDER, { recursive: true });
-
-serve(async (req) => {
-  const url = new URL(req.url);
-
-  if (req.method === "POST" && url.pathname === "/upload-cookies") {
-    try {
-      const boundary = req.headers.get("content-type")?.split("boundary=")[1];
-      if (!boundary) return json({ status: "error", message: "No boundary found" }, 400);
-
-      const body = await req.arrayBuffer();
-      const reader = new MultipartReader(new Deno.Buffer(body), boundary);
-      const form = await reader.readForm();
-
-      const file = form.file("file");
-      if (!file) return json({ status: "error", message: "No file uploaded" }, 400);
-
-      const filename = `${COOKIE_FOLDER}/${v4.generate()}.txt`;
-      await Deno.writeFile(filename, await Deno.readFile(file.filename));
-      return json({ status: "success", path: filename });
-    } catch (err) {
-      return json({ status: "error", message: err.message }, 500);
-    }
+  if (pathname === "/") {
+    return text("Deno YouTube Extractor\n/formats?url=...");
   }
 
-  if (req.method === "GET" && url.pathname === "/ytdl") {
-    const videoUrl = url.searchParams.get("url");
-    const cookieFile = url.searchParams.get("cookies"); // path to uploaded cookies.txt
-    if (!videoUrl) return json({ status: "error", message: "Missing ?url=" }, 400);
-    if (!cookieFile) return json({ status: "error", message: "Missing ?cookies=" }, 400);
+  if (pathname === "/formats") {
+    const videoUrl = urlObj.searchParams.get("url");
+    if (!videoUrl) return jsonError("Missing ?url=");
 
     try {
-      // Run yt-dlp to get JSON of all formats
-      const p = Deno.run({
-        cmd: [
-          "yt-dlp",
-          "-j", // JSON output
-          "--cookies",
-          cookieFile,
-          videoUrl
-        ],
-        stdout: "piped",
-        stderr: "piped",
-      });
+      // Fetch YouTube page
+      const res = await fetch(videoUrl, { headers: { "User-Agent": "Mozilla/5.0" } });
+      const html = await res.text();
 
-      const output = await p.output();
-      const raw = new TextDecoder().decode(output);
-      const data = JSON.parse(raw);
+      // Extract player JSON
+      const match = html.match(/ytInitialPlayerResponse\s*=\s*(\{.+?\});/s);
+      if (!match) return jsonError("Could not extract player JSON");
 
-      p.close();
+      const player = JSON.parse(match[1]);
+      const videoDetails = player.videoDetails || {};
+      const streamingData = player.streamingData || {};
+      const formats = streamingData.formats || [];
+      const adaptive = streamingData.adaptiveFormats || [];
+
+      // Decode cipher URLs
+      function getUrl(f: any) {
+        if (f.url) return f.url;
+        const cipher = f.signatureCipher || f.cipher;
+        if (!cipher) return null;
+        const params = new URLSearchParams(cipher);
+        return params.get("url") || null;
+      }
+
+      const allFormats = [...formats, ...adaptive].map((f: any) => ({
+        itag: f.itag,
+        mimeType: f.mimeType,
+        qualityLabel: f.qualityLabel || f.audioQuality || "N/A",
+        bitrate: f.bitrate || 0,
+        audioBitrate: f.audioBitrate || null,
+        contentLength: f.contentLength || null,
+        url: getUrl(f),
+      }));
+
+      const audioFormats = allFormats.filter(f => f.mimeType?.includes("audio"));
+      const videoFormats = allFormats.filter(f => f.mimeType?.includes("video"));
 
       return json({
         status: "success",
-        title: data.title,
-        id: data.id,
-        uploader: data.uploader,
-        duration: data.duration,
-        formats: data.formats
+        title: videoDetails.title || "Unknown",
+        videoId: videoDetails.videoId || "",
+        author: videoDetails.author || "",
+        channelId: videoDetails.channelId || "",
+        durationSeconds: parseInt(videoDetails.lengthSeconds || "0", 10),
+        thumbnails: videoDetails.thumbnail?.thumbnails || [],
+        total: allFormats.length,
+        formats: allFormats,
+        audioFormats,
+        videoFormats,
       });
-    } catch (err) {
-      return json({ status: "error", message: err.message }, 500);
+
+    } catch (e) {
+      return jsonError(String(e));
     }
   }
 
-  return new Response("404 Not Found", { status: 404 });
+  return new Response("Not Found", { status: 404 });
 });
 
-function json(obj: any, status = 200) {
-  return new Response(JSON.stringify(obj, null, 2), {
-    status,
+function text(t: string) {
+  return new Response(t, { headers: { "content-type": "text/plain" } });
+}
+
+function jsonError(msg: string) {
+  return new Response(JSON.stringify({ status: "error", message: msg }, null, 2), {
     headers: { "content-type": "application/json" },
   });
 }
