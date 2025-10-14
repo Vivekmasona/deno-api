@@ -1,94 +1,66 @@
-// deno_ytdl_stream.ts
-// Usage: https://your-deno-deploy-url/stream?url=https://youtu.be/FkFvdukWpAI
+import { serve } from "https://deno.land/std@0.203.0/http/server.ts";
 
-Deno.serve(async (req) => {
-  const { pathname, searchParams } = new URL(req.url);
+async function getYtInfo(videoUrl: string) {
+  try {
+    // Fetch the video page
+    const res = await fetch(videoUrl, {
+      headers: {
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)",
+      },
+    });
+    const html = await res.text();
 
-  if (pathname === "/") {
-    return new Response("🦕 Deno YouTube Streamer Running! Use /stream?url=...");
+    // Extract ytInitialPlayerResponse JSON
+    const playerResponseMatch = html.match(/ytInitialPlayerResponse\s*=\s*(\{.+?\});/);
+    if (!playerResponseMatch) throw new Error("Player response not found");
+
+    const playerResponse = JSON.parse(playerResponseMatch[1]);
+
+    // Get streamingData
+    const streamingData = playerResponse.streamingData;
+    if (!streamingData) throw new Error("No streamingData found");
+
+    // Map formats to simplified structure
+    const formats = (streamingData.formats || []).map((f: any) => ({
+      itag: f.itag,
+      quality: f.qualityLabel,
+      mimeType: f.mimeType,
+      url: f.url || null, // Some require deciphering
+    }));
+
+    const adaptiveFormats = (streamingData.adaptiveFormats || []).map((f: any) => ({
+      itag: f.itag,
+      quality: f.qualityLabel,
+      mimeType: f.mimeType,
+      url: f.url || null,
+    }));
+
+    return {
+      status: "success",
+      title: playerResponse.videoDetails?.title || "Unknown",
+      videoId: playerResponse.videoDetails?.videoId,
+      author: playerResponse.videoDetails?.author,
+      durationSeconds: playerResponse.videoDetails?.lengthSeconds,
+      formats,
+      adaptiveFormats,
+    };
+  } catch (err) {
+    return { status: "error", message: err.message };
   }
-
-  if (pathname === "/stream") {
-    const ytUrl = searchParams.get("url");
-    if (!ytUrl) return error("Missing ?url= parameter");
-
-    try {
-      // Fetch YouTube page
-      const html = await fetchPage(ytUrl);
-
-      // Extract player JSON
-      const playerJson = extractPlayerJSON(html);
-      if (!playerJson) return error("Could not extract player JSON");
-
-      const formats = [...(playerJson.streamingData?.formats || []), ...(playerJson.streamingData?.adaptiveFormats || [])];
-      if (!formats.length) return error("No formats found");
-
-      // Choose a playable format (video+audio or audio)
-      const format = formats.find(f => f.itag === 18) || formats[0];
-
-      // Get playable URL
-      const streamUrl = await getPlayableUrl(format, html);
-
-      if (!streamUrl) return error("Could not generate playable URL");
-
-      return Response.redirect(streamUrl, 302);
-
-    } catch (err) {
-      return error(err.message);
-    }
-  }
-
-  return new Response("404 Not Found", { status: 404 });
-});
-
-// ----------------- Helpers -----------------
-async function fetchPage(url: string) {
-  const res = await fetch(url, { headers: { "User-Agent": "Mozilla/5.0" } });
-  return await res.text();
 }
 
-function extractPlayerJSON(html: string) {
-  const match = html.match(/ytInitialPlayerResponse\s*=\s*(\{.+?\});/s);
-  if (!match) return null;
-  return JSON.parse(match[1]);
-}
+serve(async (req) => {
+  const url = new URL(req.url);
+  const videoUrl = url.searchParams.get("url");
 
-async function getPlayableUrl(format: any, html: string) {
-  if (format.url) return format.url;
-
-  const cipher = format.signatureCipher || format.cipher;
-  if (!cipher) return null;
-
-  const params = new URLSearchParams(cipher);
-  let url = params.get("url");
-  const s = params.get("s");
-  const sp = params.get("sp") || "signature";
-
-  if (s && url) {
-    // Extract player JS
-    const jsMatch = html.match(/"jsUrl":"(\/s\/player\/[a-zA-Z0-9\/._-]+\.js)"/);
-    if (!jsMatch) return null;
-    const playerJsUrl = `https://www.youtube.com${jsMatch[1]}`;
-
-    const jsText = await (await fetch(playerJsUrl)).text();
-    const decipherFuncNameMatch = jsText.match(/([a-zA-Z0-9$]{2})=function\(a\)\{a=a\.split\(""\);.+?return a\.join\(""\)\}/s);
-
-    if (!decipherFuncNameMatch) return null;
-
-    const funcCode = decipherFuncNameMatch[0];
-    const decipher = new Function("s", `
-      ${funcCode.replace(/a=/g,"let a=")}
-      return ${decipherFuncNameMatch[1]}(s);
-    `) as (s: string) => string;
-
-    url += `&${sp}=${decipher(s)}`;
+  if (!videoUrl) {
+    return new Response(JSON.stringify({ status: "error", message: "url param required" }), {
+      headers: { "Content-Type": "application/json" },
+    });
   }
 
-  return url;
-}
-
-function error(msg: string) {
-  return new Response(JSON.stringify({ status: "error", message: msg }, null, 2), {
-    headers: { "content-type": "application/json" },
+  const info = await getYtInfo(videoUrl);
+  return new Response(JSON.stringify(info), {
+    headers: { "Content-Type": "application/json" },
   });
-}
+});
