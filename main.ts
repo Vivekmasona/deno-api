@@ -1,66 +1,109 @@
-import { serve } from "https://deno.land/std@0.203.0/http/server.ts";
+// deno_ytdl_decipher.ts
+// Usage: https://your-deno-deploy-url/ytdl?url=https://youtu.be/FkFvdukWpAI
 
-async function getYtInfo(videoUrl: string) {
-  try {
-    // Fetch the video page
-    const res = await fetch(videoUrl, {
-      headers: {
-        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)",
-      },
-    });
-    const html = await res.text();
+Deno.serve(async (req) => {
+  const { pathname, searchParams } = new URL(req.url);
 
-    // Extract ytInitialPlayerResponse JSON
-    const playerResponseMatch = html.match(/ytInitialPlayerResponse\s*=\s*(\{.+?\});/);
-    if (!playerResponseMatch) throw new Error("Player response not found");
-
-    const playerResponse = JSON.parse(playerResponseMatch[1]);
-
-    // Get streamingData
-    const streamingData = playerResponse.streamingData;
-    if (!streamingData) throw new Error("No streamingData found");
-
-    // Map formats to simplified structure
-    const formats = (streamingData.formats || []).map((f: any) => ({
-      itag: f.itag,
-      quality: f.qualityLabel,
-      mimeType: f.mimeType,
-      url: f.url || null, // Some require deciphering
-    }));
-
-    const adaptiveFormats = (streamingData.adaptiveFormats || []).map((f: any) => ({
-      itag: f.itag,
-      quality: f.qualityLabel,
-      mimeType: f.mimeType,
-      url: f.url || null,
-    }));
-
-    return {
+  if (pathname === "/") {
+    return json({
       status: "success",
-      title: playerResponse.videoDetails?.title || "Unknown",
-      videoId: playerResponse.videoDetails?.videoId,
-      author: playerResponse.videoDetails?.author,
-      durationSeconds: playerResponse.videoDetails?.lengthSeconds,
-      formats,
-      adaptiveFormats,
-    };
-  } catch (err) {
-    return { status: "error", message: err.message };
+      message: "🦕 Deno YouTube Auto-Decipher Extractor Running!\nUse /ytdl?url=..."
+    });
   }
+
+  if (pathname === "/ytdl") {
+    const ytUrl = searchParams.get("url");
+    if (!ytUrl) return error("Missing ?url=");
+
+    try {
+      const res = await fetch(ytUrl, { headers: { "User-Agent": "Mozilla/5.0" } });
+      const html = await res.text();
+
+      // Extract ytInitialPlayerResponse
+      const playerMatch = html.match(/ytInitialPlayerResponse\s*=\s*(\{.+?\});/s);
+      if (!playerMatch) return error("Could not parse player JSON");
+      const player = JSON.parse(playerMatch[1]);
+      const videoDetails = player.videoDetails || {};
+      const streamingData = player.streamingData || {};
+      const formats = streamingData.formats || [];
+      const adaptive = streamingData.adaptiveFormats || [];
+
+      // Extract the player JS URL
+      const jsMatch = html.match(/"jsUrl":"(\/s\/player\/[a-zA-Z0-9\/._-]+\.js)"/);
+      if (!jsMatch) return error("Could not find player JS URL");
+      const playerJsUrl = `https://www.youtube.com${jsMatch[1]}`;
+
+      // Fetch player JS
+      const jsResp = await fetch(playerJsUrl);
+      const jsText = await jsResp.text();
+
+      // Minimal signature decipher function extraction
+      const decipherFuncNameMatch = jsText.match(/([a-zA-Z0-9$]{2})=function\(a\)\{a=a\.split\(""\);.+?return a\.join\(""\)\}/s);
+      let decipher: ((s: string) => string) | null = null;
+
+      if (decipherFuncNameMatch) {
+        const funcCode = decipherFuncNameMatch[0];
+        // Eval safe: only works on strings and arrays
+        decipher = new Function("s", `
+          ${funcCode.replace(/a=/g,"let a=")}
+          return ${decipherFuncNameMatch[1]}(s);
+        `) as (s: string) => string;
+      }
+
+      function getUrl(format: any) {
+        if (format.url) return format.url;
+        const cipher = format.signatureCipher || format.cipher;
+        if (!cipher) return null;
+        const params = new URLSearchParams(cipher);
+        let url = params.get("url");
+        const s = params.get("s");
+        const sp = params.get("sp") || "signature";
+        if (s && url && decipher) {
+          url += `&${sp}=${decipher(s)}`;
+        }
+        return url;
+      }
+
+      const allFormats = [...formats, ...adaptive].map((f: any) => ({
+        itag: f.itag,
+        mimeType: f.mimeType,
+        qualityLabel: f.qualityLabel || f.audioQuality || "N/A",
+        bitrate: f.bitrate || 0,
+        audioBitrate: f.audioBitrate || 0,
+        contentLength: f.contentLength || null,
+        url: getUrl(f),
+      })).filter(f => f.url);
+
+      const audioFormats = allFormats.filter(f => f.mimeType.includes("audio"));
+      const videoFormats = allFormats.filter(f => f.mimeType.includes("video"));
+
+      return json({
+        status: "success",
+        title: videoDetails.title || "Unknown",
+        videoId: videoDetails.videoId || "",
+        author: videoDetails.author || "",
+        durationSeconds: parseInt(videoDetails.lengthSeconds || "0", 10),
+        thumbnails: videoDetails.thumbnail?.thumbnails || [],
+        formats: allFormats,
+        audioFormats,
+        videoFormats,
+      });
+
+    } catch (err) {
+      return error(err.message);
+    }
+  }
+
+  return new Response("404 Not Found", { status: 404 });
+});
+
+// ----------------- Helper Functions -----------------
+function json(obj: any) {
+  return new Response(JSON.stringify(obj, null, 2), {
+    headers: { "content-type": "application/json" },
+  });
 }
 
-serve(async (req) => {
-  const url = new URL(req.url);
-  const videoUrl = url.searchParams.get("url");
-
-  if (!videoUrl) {
-    return new Response(JSON.stringify({ status: "error", message: "url param required" }), {
-      headers: { "Content-Type": "application/json" },
-    });
-  }
-
-  const info = await getYtInfo(videoUrl);
-  return new Response(JSON.stringify(info), {
-    headers: { "Content-Type": "application/json" },
-  });
-});
+function error(msg: string) {
+  return json({ status: "error", message: msg });
+        }
