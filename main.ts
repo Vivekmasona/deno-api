@@ -1,65 +1,128 @@
-// main.ts (Deno)
-// -- only works for small demo, but scalable pattern
-import { serve } from "https://deno.land/std@0.224.0/http/server.ts";
+// Deno YouTube Opus Audio Extractor
+// Usage: http://localhost:8000/ytdl-opus?url=https://youtu.be/FkFvdukWpAI
 
-interface User { uid: string; ws: WebSocket; }
+import { serve } from "https://deno.land/std@0.203.0/http/server.ts";
 
-const onlineUsers: User[] = [];
-const rooms: Record<string, User[]> = {};
+serve(async (req) => {
+  const { pathname, searchParams } = new URL(req.url);
 
-serve(req => {
-  const url = new URL(req.url);
-  if(url.pathname==='/') return new Response(html,{headers:{'content-type':'text/html'}});
-  if(url.pathname==='/ws'){
-    const {socket,response}=Deno.upgradeWebSocket(req);
-    let currentUser: User|null = null;
+  if (pathname === "/") {
+    return json({ status: "success", message: "Deno YouTube Opus Extractor Running" });
+  }
 
-    socket.onmessage=e=>{
-      const data=JSON.parse(e.data);
-      if(data.type==='join'){
-        currentUser={uid:data.uid,ws:socket};
-        onlineUsers.push(currentUser);
-      }
-      if(data.type==='signal'){
-        const room=rooms[data.room];
-        room?.forEach(u=>{if(u.uid!==currentUser?.uid) u.ws.send(JSON.stringify(data));});
-      }
-      if(data.type==='change-user'){
-        onlineUsers.splice(onlineUsers.findIndex(u=>u.uid===currentUser?.uid),1);
-        socket.close();
+  if (pathname === "/ytdl-opus") {
+    const ytUrl = searchParams.get("url");
+    if (!ytUrl) return error("Missing ?url=");
+
+    try {
+      const html = await (await fetch(ytUrl, { headers: { "User-Agent": "Mozilla/5.0" } })).text();
+
+      // Parse player JSON
+      const match = html.match(/ytInitialPlayerResponse\s*=\s*(\{.+?\});/s);
+      if (!match) return error("Cannot parse player JSON");
+
+      const player = JSON.parse(match[1]);
+      const videoDetails = player.videoDetails || {};
+      const adaptive = player.streamingData?.adaptiveFormats || [];
+
+      // Extract player JS URL
+      const jsUrlMatch = html.match(/"jsUrl":"(\/s\/player\/[\w\d\/\.\-_]+\.js)"/);
+      if (!jsUrlMatch) return error("Cannot find player JS URL");
+
+      const jsUrl = "https://www.youtube.com" + jsUrlMatch[1];
+      const playerJs = await (await fetch(jsUrl)).text();
+
+      // Create decipher function
+      const decipher = createDecipher(playerJs);
+
+      // Filter Opus audio formats and decipher
+      const opusFormats = adaptive
+        .filter((f: any) => f.mimeType?.includes("audio/webm") && f.mimeType?.includes("opus"))
+        .map((f: any) => {
+          if (f.url) return f; // Already has working URL
+          const cipher = f.signatureCipher || f.cipher;
+          if (!cipher) return f;
+
+          const params = new URLSearchParams(cipher);
+          const url = params.get("url")!;
+          const s = params.get("s");
+          const sp = params.get("sp") || "signature";
+          const sig = s ? decipher(s) : params.get("sig");
+
+          return { ...f, url: sig ? `${url}&${sp}=${sig}` : url };
+        });
+
+      return json({
+        status: "success",
+        title: videoDetails.title,
+        videoId: videoDetails.videoId,
+        author: videoDetails.author,
+        opusFormats,
+      });
+
+    } catch (e) {
+      return error(String(e));
+    }
+  }
+
+  return new Response("404 Not Found", { status: 404 });
+});
+
+// ----------------- Helper Functions -----------------
+function json(obj: any) {
+  return new Response(JSON.stringify(obj, null, 2), { headers: { "content-type": "application/json" } });
+}
+
+function error(msg: string) {
+  return json({ status: "error", message: msg });
+}
+
+// ----------------- YouTube Signature Decipher -----------------
+function createDecipher(jsCode: string) {
+  // Extract the main cipher function name
+  const fnNameMatch = jsCode.match(/\.sig\|\|([a-zA-Z0-9$]+)\(/);
+  if (!fnNameMatch) return (s: string) => s;
+
+  const fnName = fnNameMatch[1].replace(/\$/g, "\\$");
+
+  // Extract function body
+  const fnBodyMatch = jsCode.match(new RegExp(`${fnName}=function\\(a\\)\\{(.*?)\\}`, "s"));
+  if (!fnBodyMatch) return (s: string) => s;
+
+  const fnBody = fnBodyMatch[1];
+
+  // Extract helper object name
+  const helperNameMatch = fnBody.match(/;([a-zA-Z0-9$]{2})\./);
+  if (!helperNameMatch) return (s: string) => s;
+  const helperName = helperNameMatch[1].replace(/\$/g, "\\$");
+
+  // Extract helper object body
+  const helperBodyMatch = jsCode.match(new RegExp(`var ${helperName}=\\{(.*?)\\};`, "s"));
+  if (!helperBodyMatch) return (s: string) => s;
+  const helperBody = helperBodyMatch[1];
+
+  // Simple parser: handle common ops (reverse, slice, swap)
+  return function decipher(sig: string): string {
+    let a = sig.split("");
+
+    // Example: parse operations
+    // This is minimal and works for common current YouTube player JS
+    const ops = fnBody.split(";").filter(l => l.includes(helperName + "."));
+    for (const op of ops) {
+      if (op.includes("reverse")) a = a.reverse();
+      else if (op.includes("splice")) {
+        const nMatch = op.match(/splice\((\d+)\)/);
+        if (nMatch) a.splice(0, parseInt(nMatch[1], 10));
+      } else if (op.includes("swap")) {
+        const nMatch = op.match(/(\w+)\[0\]=\w+\[(\d+)\]/);
+        if (nMatch) {
+          const i = parseInt(nMatch[2], 10);
+          const tmp = a[0];
+          a[0] = a[i];
+          a[i] = tmp;
+        }
       }
     }
-
-    socket.onclose=()=>{
-      if(currentUser) onlineUsers.splice(onlineUsers.findIndex(u=>u.uid===currentUser?.uid),1);
-      for(const room in rooms){ rooms[room]=rooms[room].filter(u=>u.uid!==currentUser?.uid); if(rooms[room].length===0) delete rooms[room]; }
-    }
-
-    return response;
-  }
-  return new Response("404",{status:404});
-},{port:8080});
-
-// Automatic pairing (simple logic, scalable version would use Redis queue)
-setInterval(()=>{
-  const shuffled=[...onlineUsers].sort(()=>Math.random()-0.5);
-  for(let i=0;i+1<shuffled.length;i+=2){
-    const a=shuffled[i],b=shuffled[i+1];
-    const room=`room_${crypto.randomUUID()}`;
-    rooms[room]=[a,b];
-    a.ws.send(JSON.stringify({type:'matched',room,peer:b.uid}));
-    b.ws.send(JSON.stringify({type:'matched',room,peer:a.uid}));
-  }
-},5000);
-
-const html=`
-<!DOCTYPE html><html><body>
-<script>
-const uid=localStorage.getItem('uid')||crypto.randomUUID();
-localStorage.setItem('uid',uid);
-const ws=new WebSocket('ws://'+location.host+'/ws');
-ws.onopen=()=>ws.send(JSON.stringify({type:'join',uid}));
-ws.onmessage=e=>{console.log('Server:',e.data);}
-</script>
-</body></html>
-`;
+    return a.join("");
+  };
+}
