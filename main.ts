@@ -1,7 +1,5 @@
 // main.ts
 // Deno Deploy compatible YouTube formats extractor
-// Run: deno deploy or deno run --allow-net main.ts
-
 Deno.serve(async (req) => {
   const urlObj = new URL(req.url);
   const pathname = urlObj.pathname;
@@ -15,11 +13,9 @@ Deno.serve(async (req) => {
     if (!videoUrl) return jsonError("Missing ?url=");
 
     try {
-      // Fetch YouTube page
       const res = await fetch(videoUrl, { headers: { "User-Agent": "Mozilla/5.0" } });
       const html = await res.text();
 
-      // Extract player JSON
       const match = html.match(/ytInitialPlayerResponse\s*=\s*(\{.+?\});/s);
       if (!match) return jsonError("Could not extract player JSON");
 
@@ -29,7 +25,6 @@ Deno.serve(async (req) => {
       const formats = streamingData.formats || [];
       const adaptive = streamingData.adaptiveFormats || [];
 
-      // Decode cipher URLs
       function getUrl(f: any) {
         if (f.url) return f.url;
         const cipher = f.signatureCipher || f.cipher;
@@ -73,12 +68,19 @@ Deno.serve(async (req) => {
   return new Response("Not Found", { status: 404 });
 });
 
+// ---------------- Helper functions ----------------
 function text(t: string) {
   return new Response(t, { headers: { "content-type": "text/plain" } });
 }
 
 function jsonError(msg: string) {
   return new Response(JSON.stringify({ status: "error", message: msg }, null, 2), {
+    headers: { "content-type": "application/json" },
+  });
+}
+
+function json(obj: any) {
+  return new Response(JSON.stringify(obj, null, 2), {
     headers: { "content-type": "application/json" },
   });
 }
