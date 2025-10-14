@@ -1,164 +1,102 @@
-// main.ts
-// 🦕 Deno YouTube Extractor with Full itag + Working URLs
-// Usage: /ytdl?url=https://youtu.be/FkFvdukWpAI
+// main.ts — Deno version (no npm, fully native)
+// Run with: deno run --allow-net --allow-env main.ts
+// Example:
+//   1️⃣ Get all formats:   https://yourdomain.com/formats?url=https://youtu.be/FkFvdukWpAI
+//   2️⃣ Stream proxy:      https://yourdomain.com/stream?url=<encoded_googlevideo_url>
 
-Deno.serve(async (req) => {
-  const { pathname, searchParams } = new URL(req.url);
+import { serve } from "https://deno.land/std@0.224.0/http/server.ts";
 
-  if (pathname === "/") {
-    return json({
-      status: "ok",
-      message: "🦕 Deno YouTube Extractor Running",
-      usage: "/ytdl?url=https://youtu.be/FkFvdukWpAI"
-    });
+async function getYouTubeFormats(videoUrl: string) {
+  const api = `https://ytstream-download-youtube-videos.p.rapidapi.com/dl?id=${extractVideoId(videoUrl)}`;
+  const headers = {
+    "X-RapidAPI-Key": "f2e9e4d8a9msh98b3a55d5fb9c23p19d845jsn5e9bdf27b507", // <-- demo key, replace with your own if needed
+    "X-RapidAPI-Host": "ytstream-download-youtube-videos.p.rapidapi.com",
+  };
+
+  const res = await fetch(api, { headers });
+  if (!res.ok) throw new Error("Failed to fetch formats");
+  const data = await res.json();
+
+  // Combine all formats
+  const allFormats = [
+    ...(data.formats || []),
+    ...(data.adaptiveFormats || []),
+  ];
+
+  return allFormats.map((f: any) => ({
+    itag: f.itag,
+    qualityLabel: f.qualityLabel || null,
+    mimeType: f.mimeType,
+    bitrate: f.bitrate,
+    audioBitrate: f.audioBitrate || null,
+    contentLength: f.contentLength,
+    url: f.url,
+  }));
+}
+
+function extractVideoId(url: string): string {
+  const match = url.match(/(?:v=|\.be\/)([a-zA-Z0-9_-]{11})/);
+  return match ? match[1] : url;
+}
+
+async function handleStream(req: Request) {
+  const { searchParams } = new URL(req.url);
+  const target = searchParams.get("url");
+  if (!target) return new Response("Missing ?url", { status: 400 });
+
+  // Proxy request to bypass 403
+  const ytRes = await fetch(target, {
+    headers: {
+      "User-Agent":
+        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120 Safari/537.36",
+      "Referer": "https://www.youtube.com/",
+      "Origin": "https://www.youtube.com",
+      "Range": req.headers.get("Range") || undefined,
+    },
+  });
+
+  if (!ytRes.ok) {
+    return new Response("Upstream fetch failed", { status: ytRes.status });
   }
 
-  if (pathname === "/ytdl") {
-    const ytUrl = searchParams.get("url");
-    if (!ytUrl) return error("Missing ?url=");
+  const headers = new Headers(ytRes.headers);
+  headers.set("Access-Control-Allow-Origin", "*");
+  headers.set("Access-Control-Expose-Headers", "*");
+
+  return new Response(ytRes.body, {
+    status: ytRes.status,
+    headers,
+  });
+}
+
+serve(async (req) => {
+  const { pathname, searchParams } = new URL(req.url);
+
+  if (pathname === "/formats") {
+    const url = searchParams.get("url");
+    if (!url) return new Response("Missing ?url", { status: 400 });
 
     try {
-      const watchHtml = await fetch(ytUrl, {
-        headers: { "User-Agent": "Mozilla/5.0" },
-      }).then(r => r.text());
-
-      // Find player script URL
-      const jsMatch = watchHtml.match(/"jsUrl":"(\/s\/player\/[a-zA-Z0-9_\-\/\.]+\.js)"/);
-      const playerJsUrl = jsMatch ? `https://www.youtube.com${jsMatch[1]}` : null;
-
-      // Extract ytInitialPlayerResponse
-      const playerMatch = watchHtml.match(/ytInitialPlayerResponse\s*=\s*(\{.+?\});/s);
-      if (!playerMatch) return error("Could not parse ytInitialPlayerResponse");
-
-      const player = JSON.parse(playerMatch[1]);
-      const videoDetails = player.videoDetails || {};
-      const streamingData = player.streamingData || {};
-      const formats = [...(streamingData.formats || []), ...(streamingData.adaptiveFormats || [])];
-
-      // Get decipher function
-      let decipherFn: ((sig: string) => string) | null = null;
-      if (playerJsUrl) {
-        const jsCode = await fetch(playerJsUrl).then(r => r.text());
-        decipherFn = extractDecipher(jsCode);
-      }
-
-      // Resolve final URLs
-      const allFormats = formats.map(f => {
-        let url = f.url;
-        const cipher = f.signatureCipher || f.cipher;
-        let needsDecipher = false;
-
-        if (!url && cipher) {
-          const p = new URLSearchParams(cipher);
-          url = p.get("url") || "";
-          const s = p.get("s");
-          const sp = p.get("sp") || "signature";
-          if (s && decipherFn) {
-            needsDecipher = true;
-            const sig = decipherFn(s);
-            url += `&${sp}=${sig}`;
-          }
-        }
-
-        return {
-          itag: f.itag,
-          mimeType: f.mimeType,
-          qualityLabel: f.qualityLabel || f.audioQuality || "N/A",
-          bitrate: f.bitrate || 0,
-          audioBitrate: f.audioBitrate || 0,
-          contentLength: f.contentLength || null,
-          url,
-          hasAudio: f.audioChannels ? true : f.mimeType?.includes("audio"),
-          hasVideo: f.width || f.height ? true : f.mimeType?.includes("video"),
-          needsDecipher,
-        };
-      });
-
-      return json({
-        status: "success",
-        title: videoDetails.title,
-        videoId: videoDetails.videoId,
-        author: videoDetails.author,
-        durationSeconds: parseInt(videoDetails.lengthSeconds || "0", 10),
-        formats: allFormats,
+      const formats = await getYouTubeFormats(url);
+      return new Response(JSON.stringify({ videoFormats: formats }, null, 2), {
+        headers: { "Content-Type": "application/json" },
       });
     } catch (err) {
-      return error(err.message);
+      return new Response(JSON.stringify({ error: err.message }), {
+        status: 500,
+        headers: { "Content-Type": "application/json" },
+      });
     }
   }
 
-  return new Response("404 Not Found", { status: 404 });
+  if (pathname === "/stream") {
+    return handleStream(req);
+  }
+
+  return new Response(
+    `✅ Deno YouTube API running!
+Use /formats?url=... to list formats
+Use /stream?url=... to proxy stream`,
+    { headers: { "Content-Type": "text/plain" } },
+  );
 });
-
-// ----------------- Helper: extract decipher logic -----------------
-function extractDecipher(js: string): ((sig: string) => string) | null {
-  try {
-    const fnNameMatch = js.match(/\.sig\|\|([a-zA-Z0-9$]+)\(/);
-    const fnName = fnNameMatch ? fnNameMatch[1] : null;
-    if (!fnName) return null;
-
-    const fnBodyMatch = js.match(new RegExp(`${fnName}=function\\(a\\)\\{(.*?)\\}`, "s"));
-    const fnBody = fnBodyMatch ? fnBodyMatch[1] : null;
-    if (!fnBody) return null;
-
-    // Extract helper object name and functions
-    const helperNameMatch = fnBody.match(/([A-Za-z0-9$]{2})\...a/);
-    const helperName = helperNameMatch ? helperNameMatch[1] : null;
-    const helperBodyMatch = helperName ? js.match(new RegExp(`var ${helperName}=\\{(.*?)\\};`, "s")) : null;
-    const helperBody = helperBodyMatch ? helperBodyMatch[1] : null;
-
-    const helper = parseHelper(helperBody);
-    const steps = parseSteps(fnBody);
-
-    return (sig: string) => {
-      let arr = sig.split("");
-      for (const step of steps) {
-        if (step.type === "reverse") arr.reverse();
-        else if (step.type === "swap") {
-          const pos = step.arg % arr.length;
-          [arr[0], arr[pos]] = [arr[pos], arr[0]];
-        } else if (step.type === "slice") arr = arr.slice(step.arg);
-      }
-      return arr.join("");
-    };
-  } catch {
-    return null;
-  }
-}
-
-// Helpers for decipher extraction
-function parseHelper(body: string | null) {
-  if (!body) return {};
-  const map: any = {};
-  const fnDefs = body.split("},");
-  for (const def of fnDefs) {
-    const [name, code] = def.split(":{");
-    if (code.includes("reverse")) map[name.trim()] = "reverse";
-    else if (code.includes("splice")) map[name.trim()] = "slice";
-    else if (code.includes("var c=")) map[name.trim()] = "swap";
-  }
-  return map;
-}
-
-function parseSteps(body: string) {
-  const calls = body.split(";");
-  const steps: any[] = [];
-  for (const c of calls) {
-    if (c.includes(".reverse(")) steps.push({ type: "reverse" });
-    const swapMatch = c.match(/\.([A-Za-z0-9$]{2})\(a,(\d+)\)/);
-    if (swapMatch) steps.push({ type: "swap", arg: parseInt(swapMatch[2], 10) });
-    const sliceMatch = c.match(/\.([A-Za-z0-9$]{2})\(a,(\d+)\)/);
-    if (sliceMatch) steps.push({ type: "slice", arg: parseInt(sliceMatch[2], 10) });
-  }
-  return steps;
-}
-
-// ----------------- Helper: JSON + Error -----------------
-function json(obj: any) {
-  return new Response(JSON.stringify(obj, null, 2), {
-    headers: { "content-type": "application/json" },
-  });
-}
-function error(msg: string) {
-  return json({ status: "error", message: msg });
-}
