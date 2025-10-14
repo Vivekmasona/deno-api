@@ -1,101 +1,110 @@
-// main.ts — Deno native YouTube extractor + proxy
-// Run: deno run --allow-net --allow-env main.ts
-// Example:
-//   /formats?url=https://youtu.be/FkFvdukWpAI
-//   /stream?url=<encoded_googlevideo_url>
+// main.ts — 100% Deno Native YouTube Extractor + Proxy
+// Run: deno run --allow-net main.ts
 
-import { Innertube } from "npm:youtubei.js";
 import { serve } from "https://deno.land/std@0.224.0/http/server.ts";
 
-// YouTube internal API client
-let yt: Innertube | null = null;
-async function getClient() {
-  if (!yt) yt = await Innertube.create();
-  return yt;
-}
-
-// Extract YouTube video ID
-function extractVideoId(url: string): string {
-  const match = url.match(/(?:v=|\.be\/)([a-zA-Z0-9_-]{11})/);
-  return match ? match[1] : url;
-}
-
-// Get all formats (itag, url, bitrate, qualityLabel...)
-async function getFormats(videoUrl: string) {
-  const client = await getClient();
-  const id = extractVideoId(videoUrl);
-  const info = await client.getInfo(id);
-
-  const all = [
-    ...info.streaming_data?.formats || [],
-    ...info.streaming_data?.adaptive_formats || [],
-  ];
-
-  return all.map((f: any) => ({
-    itag: f.itag,
-    mimeType: f.mime_type,
-    qualityLabel: f.quality_label || null,
-    bitrate: f.bitrate,
-    audioBitrate: f.audio_bitrate || null,
-    contentLength: f.content_length,
-    url: f.decipher(client.session.player) // resolve signature
-  }));
-}
-
-// Stream proxy (403 safe)
-async function handleStream(req: Request) {
-  const { searchParams } = new URL(req.url);
-  const target = searchParams.get("url");
-  if (!target) return new Response("Missing ?url", { status: 400 });
-
-  const ytRes = await fetch(target, {
-    headers: {
-      "User-Agent":
-        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120 Safari/537.36",
-      "Referer": "https://www.youtube.com/",
-      "Origin": "https://www.youtube.com",
-      "Range": req.headers.get("Range") || undefined,
-    },
-  });
-
-  const headers = new Headers(ytRes.headers);
-  headers.set("Access-Control-Allow-Origin", "*");
-  headers.set("Access-Control-Expose-Headers", "*");
-
-  return new Response(ytRes.body, {
-    status: ytRes.status,
-    headers,
-  });
-}
-
-// Server routes
 serve(async (req) => {
   const { pathname, searchParams } = new URL(req.url);
 
+  // Root info
+  if (pathname === "/") {
+    return json({
+      status: "ok",
+      message:
+        "🦕 Deno YouTube Extractor Running!\nUse /formats?url=... or /stream?url=...",
+    });
+  }
+
+  // Get all formats
   if (pathname === "/formats") {
-    const url = searchParams.get("url");
-    if (!url) return new Response("Missing ?url", { status: 400 });
+    const ytUrl = searchParams.get("url");
+    if (!ytUrl) return error("Missing ?url=");
 
     try {
-      const formats = await getFormats(url);
-      return new Response(JSON.stringify({ videoFormats: formats }, null, 2), {
-        headers: { "Content-Type": "application/json" },
+      const html = await fetch(ytUrl, {
+        headers: { "User-Agent": "Mozilla/5.0 Chrome/120 Safari/537.36" },
+      }).then((r) => r.text());
+
+      const playerMatch = html.match(/ytInitialPlayerResponse\s*=\s*(\{.+?\});/s);
+      if (!playerMatch) return error("Failed to extract player JSON");
+
+      const player = JSON.parse(playerMatch[1]);
+      const streamingData = player.streamingData || {};
+      const formats = streamingData.formats || [];
+      const adaptiveFormats = streamingData.adaptiveFormats || [];
+      const allFormats = [...formats, ...adaptiveFormats];
+
+      // Parse format URLs (signatureCipher included)
+      const result = allFormats.map((f: any) => {
+        const cipher = f.signatureCipher || f.cipher;
+        let url = f.url || null;
+
+        if (cipher) {
+          const params = new URLSearchParams(cipher);
+          url = params.get("url");
+          const sig = params.get("sig") || params.get("signature");
+          const sp = params.get("sp");
+          if (url && sig && sp) url += `&${sp}=${sig}`;
+        }
+
+        return {
+          itag: f.itag,
+          mimeType: f.mimeType,
+          qualityLabel: f.qualityLabel || f.audioQuality || null,
+          bitrate: f.bitrate || null,
+          audioBitrate: f.audioBitrate || null,
+          contentLength: f.contentLength || null,
+          url,
+        };
+      }).filter((f: any) => f.url);
+
+      return json({
+        status: "success",
+        total: result.length,
+        formats: result,
       });
     } catch (err) {
-      console.error(err);
-      return new Response(JSON.stringify({ error: err.message }), {
-        status: 500,
-        headers: { "Content-Type": "application/json" },
-      });
+      return error(err.message);
     }
   }
 
-  if (pathname === "/stream") return handleStream(req);
+  // Stream proxy (avoid 403)
+  if (pathname === "/stream") {
+    const target = searchParams.get("url");
+    if (!target) return error("Missing ?url=");
+    try {
+      const resp = await fetch(target, {
+        headers: {
+          "User-Agent":
+            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/120 Safari/537.36",
+          "Referer": "https://www.youtube.com/",
+          "Origin": "https://www.youtube.com",
+          "Range": req.headers.get("Range") || undefined,
+        },
+      });
 
-  return new Response(
-    `✅ Deno YouTube Extractor Running!
-Use /formats?url=... to list all itags.
-Use /stream?url=... to proxy playback.`,
-    { headers: { "Content-Type": "text/plain" } },
-  );
+      const headers = new Headers(resp.headers);
+      headers.set("Access-Control-Allow-Origin", "*");
+      headers.set("Access-Control-Expose-Headers", "*");
+
+      return new Response(resp.body, {
+        status: resp.status,
+        headers,
+      });
+    } catch (err) {
+      return error("Proxy failed: " + err.message);
+    }
+  }
+
+  return new Response("404 Not Found", { status: 404 });
 });
+
+// -------------------- Helper Functions --------------------
+function json(obj: any) {
+  return new Response(JSON.stringify(obj, null, 2), {
+    headers: { "content-type": "application/json" },
+  });
+}
+function error(msg: string) {
+  return json({ status: "error", message: msg });
+}
