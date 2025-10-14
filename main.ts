@@ -1,38 +1,71 @@
-// main.ts
-// Deno YouTube Stream Server
-// Usage: /stream?url=<youtube_url>
+// deno_ytdl.ts
+// Usage: https://your-deno-deploy-url/ytdl?url=https://youtu.be/FkFvdukWpAI
 
-import { serve } from "https://deno.land/std@0.203.0/http/server.ts";
-
-serve(async (req) => {
-  const url = new URL(req.url);
-  const pathname = url.pathname;
+Deno.serve(async (req) => {
+  const { pathname, searchParams } = new URL(req.url);
 
   if (pathname === "/") {
-    return json({ status: "success", message: "Deno YouTube Stream Running! Use /stream?url=..." });
+    return json({
+      status: "success",
+      message: "🦕 Deno YouTube Extractor Running!\nUse /ytdl?url=..."
+    });
   }
 
-  if (pathname === "/stream") {
-    const ytUrl = url.searchParams.get("url");
-    if (!ytUrl) return error("Missing ?url= parameter");
+  if (pathname === "/ytdl") {
+    const ytUrl = searchParams.get("url");
+    if (!ytUrl) return error("Missing ?url=");
 
     try {
-      // Run yt-dlp to get direct video URL
-      const p = Deno.run({
-        cmd: ["yt-dlp", "-f", "best", "-g", ytUrl],
-        stdout: "piped",
-        stderr: "piped",
+      // Fetch YouTube page
+      const res = await fetch(ytUrl, { headers: { "User-Agent": "Mozilla/5.0" } });
+      const html = await res.text();
+
+      // Extract ytInitialPlayerResponse
+      const playerMatch = html.match(/ytInitialPlayerResponse\s*=\s*(\{.+?\});/s);
+      if (!playerMatch) return error("Could not parse player JSON");
+
+      const player = JSON.parse(playerMatch[1]);
+      const videoDetails = player.videoDetails || {};
+      const streamingData = player.streamingData || {};
+      const formats = streamingData.formats || [];
+      const adaptive = streamingData.adaptiveFormats || [];
+
+      // Helper to get URL (won't decipher `s` cipher)
+      function getUrl(format: any) {
+        if (format.url) return format.url;
+        const cipher = format.signatureCipher || format.cipher;
+        if (!cipher) return null;
+        const params = new URLSearchParams(cipher);
+        return params.get("url") || null;
+      }
+
+      // Combine all formats
+      const allFormats = [...formats, ...adaptive].map((f: any) => ({
+        itag: f.itag,
+        mimeType: f.mimeType,
+        qualityLabel: f.qualityLabel || f.audioQuality || "N/A",
+        bitrate: f.bitrate || 0,
+        audioBitrate: f.audioBitrate || 0,
+        contentLength: f.contentLength || null,
+        url: getUrl(f),
+        needsDecipher: !!(f.signatureCipher || f.cipher),
+      }));
+
+      const audioFormats = allFormats.filter(f => f.mimeType.includes("audio"));
+      const videoFormats = allFormats.filter(f => f.mimeType.includes("video"));
+
+      return json({
+        status: "success",
+        title: videoDetails.title || "Unknown",
+        videoId: videoDetails.videoId || "",
+        author: videoDetails.author || "",
+        durationSeconds: parseInt(videoDetails.lengthSeconds || "0", 10),
+        thumbnails: videoDetails.thumbnail?.thumbnails || [],
+        formats: allFormats,
+        audioFormats,
+        videoFormats,
       });
 
-      const output = new TextDecoder().decode(await p.output());
-      const errOutput = new TextDecoder().decode(await p.stderrOutput());
-      p.close();
-
-      if (errOutput) return error("yt-dlp error: " + errOutput.trim());
-      const videoUrl = output.trim();
-      if (!videoUrl) return error("Could not fetch direct video URL");
-
-      return json({ status: "success", videoUrl });
     } catch (err) {
       return error(err.message);
     }
@@ -41,9 +74,11 @@ serve(async (req) => {
   return new Response("404 Not Found", { status: 404 });
 });
 
-// ---------------- Helpers ----------------
+// ----------------- Helper Functions -----------------
 function json(obj: any) {
-  return new Response(JSON.stringify(obj, null, 2), { headers: { "Content-Type": "application/json" } });
+  return new Response(JSON.stringify(obj, null, 2), {
+    headers: { "content-type": "application/json" },
+  });
 }
 
 function error(msg: string) {
