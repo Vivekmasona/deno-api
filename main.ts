@@ -1,10 +1,7 @@
 // server.ts
-// Run: deno run --allow-net --allow-read server.ts
-
 import { serve } from "https://deno.land/std@0.200.0/http/server.ts";
 import { extname, join } from "https://deno.land/std@0.200.0/path/mod.ts";
 
-// In-memory store of clients
 interface Client {
   id: string;
   name: string;
@@ -15,101 +12,106 @@ interface Client {
 }
 const clients = new Map<string, Client>();
 
-// cooldowns for pair alerts to avoid spamming: key "minId|maxId" => timestamp last alerted
 const pairCooldown = new Map<string, number>();
-const ALERT_COOLDOWN_MS = 30_000; // 30s cooldown per pair
+const ALERT_COOLDOWN_MS = 10_000; // adjust as needed (10s)
 
-// Haversine distance in meters
 function metersBetween(lat1: number, lon1: number, lat2: number, lon2: number) {
-  const R = 6371000; // earth radius meters
+  const R = 6371000;
   const toRad = (deg: number) => (deg * Math.PI) / 180;
   const dLat = toRad(lat2 - lat1);
   const dLon = toRad(lon2 - lon1);
   const a =
-    Math.sin(dLat / 2) * Math.sin(dLat / 2) +
+    Math.sin(dLat / 2) ** 2 +
     Math.cos(toRad(lat1)) * Math.cos(toRad(lat2)) *
-    Math.sin(dLon / 2) * Math.sin(dLon / 2);
+    Math.sin(dLon / 2) ** 2;
   const c = 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
   return R * c;
 }
 
-// serve static index.html and websocket endpoint
+function safeSend(ws: WebSocket, obj: any) {
+  try {
+    // only send if socket open
+    // In Deno WebSocket from upgrade, there is `readyState` property like browser
+    // check numeric open (1)
+    // but to be robust, wrap in try/catch
+    if ((ws as any).readyState === (ws as any).OPEN || (ws as any).readyState === 1) {
+      ws.send(JSON.stringify(obj));
+    }
+  } catch (_e) {}
+}
+
+function checkProximityFor(id: string) {
+  const c = clients.get(id);
+  if (!c || c.lat == null || c.lon == null) return;
+  const now = Date.now();
+  for (const [otherId, other] of clients) {
+    if (otherId === id) continue;
+    if (other.lat == null || other.lon == null) continue;
+    const dist = metersBetween(c.lat, c.lon, other.lat, other.lon);
+    if (dist <= 100) {
+      const a = id < otherId ? id + "|" + otherId : otherId + "|" + id;
+      const last = pairCooldown.get(a) ?? 0;
+      if (now - last >= ALERT_COOLDOWN_MS) {
+        pairCooldown.set(a, now);
+        const payloadToThis = {
+          type: "proximity",
+          withId: otherId,
+          withName: other.name,
+          distanceMeters: Math.round(dist),
+        };
+        const payloadToOther = {
+          type: "proximity",
+          withId: id,
+          withName: c.name,
+          distanceMeters: Math.round(dist),
+        };
+        safeSend(c.ws, payloadToThis);
+        safeSend(other.ws, payloadToOther);
+        console.log(`Proximity alert: ${c.name} <-> ${other.name} (${Math.round(dist)} m)`);
+      }
+    }
+  }
+}
+
 async function handler(req: Request): Promise<Response> {
   const url = new URL(req.url);
 
-  // WebSocket upgrade on /ws
   if (url.pathname === "/ws" && req.headers.get("upgrade")?.toLowerCase() === "websocket") {
     const { socket, response } = Deno.upgradeWebSocket(req);
-    socket.onopen = () => {
-      console.log("ws open");
-    };
+    socket.onopen = () => console.log("ws open");
     socket.onmessage = (ev) => {
       try {
         const data = JSON.parse(ev.data);
         if (data.type === "register") {
-          // {type: 'register', id, name}
           const id = data.id ?? crypto.randomUUID();
           const name = String(data.name ?? "Unknown");
-          clients.set(id, { id, name, ws: socket, lastSeen: Date.now() });
-          // send ack back with assigned id
-          socket.send(JSON.stringify({ type: "registered", id, name }));
+          const now = Date.now();
+          const lat = data.lat != null ? Number(data.lat) : undefined;
+          const lon = data.lon != null ? Number(data.lon) : undefined;
+          clients.set(id, { id, name, ws: socket, lastSeen: now, lat, lon });
+          safeSend(socket, { type: "registered", id, name });
           console.log("registered", id, name);
+          // Immediately check proximity for this client (in case others already present)
+          checkProximityFor(id);
         } else if (data.type === "update") {
-          // {type:'update', id, name, lat, lon}
           const id = String(data.id);
           const name = String(data.name ?? "Unknown");
           const lat = Number(data.lat);
           const lon = Number(data.lon);
           const now = Date.now();
-
-          // ensure client in map
           let c = clients.get(id);
           if (!c) {
-            c = { id, name, ws: socket, lastSeen: now };
+            c = { id, name, ws: socket, lastSeen: now, lat, lon };
             clients.set(id, c);
           } else {
             c.name = name;
             c.ws = socket;
             c.lastSeen = now;
+            c.lat = lat;
+            c.lon = lon;
           }
-          c.lat = lat;
-          c.lon = lon;
-
-          // Compare to other clients
-          for (const [otherId, other] of clients) {
-            if (otherId === id) continue;
-            if (other.lat == null || other.lon == null) continue;
-
-            const dist = metersBetween(lat, lon, other.lat, other.lon);
-            if (dist <= 100) {
-              // check cooldown
-              const a = id < otherId ? id + "|" + otherId : otherId + "|" + id;
-              const last = pairCooldown.get(a) ?? 0;
-              if (now - last >= ALERT_COOLDOWN_MS) {
-                pairCooldown.set(a, now);
-                // send proximity message to both
-                const payloadToThis = {
-                  type: "proximity",
-                  withId: otherId,
-                  withName: other.name,
-                  distanceMeters: Math.round(dist),
-                };
-                const payloadToOther = {
-                  type: "proximity",
-                  withId: id,
-                  withName: name,
-                  distanceMeters: Math.round(dist),
-                };
-                try {
-                  socket.send(JSON.stringify(payloadToThis));
-                } catch (_e) {}
-                try {
-                  other.ws.send(JSON.stringify(payloadToOther));
-                } catch (_e) {}
-                console.log(`Alert: ${name} <-> ${other.name} (${Math.round(dist)} m)`);
-              }
-            }
-          }
+          // Check proximity whenever an update is received
+          checkProximityFor(id);
         } else if (data.type === "unregister") {
           const id = String(data.id);
           clients.delete(id);
@@ -119,7 +121,6 @@ async function handler(req: Request): Promise<Response> {
       }
     };
     socket.onclose = () => {
-      // remove any clients using this socket
       for (const [id, c] of clients) {
         if (c.ws === socket) {
           clients.delete(id);
@@ -127,15 +128,11 @@ async function handler(req: Request): Promise<Response> {
         }
       }
     };
-    socket.onerror = (e) => {
-      console.error("ws error", e);
-    };
+    socket.onerror = (e) => console.error("ws error", e);
     return response;
   }
 
-  // serve static index.html for root and other files
-  let pathname = url.pathname;
-  if (pathname === "/") pathname = "/index.html";
+  let pathname = url.pathname === "/" ? "/index.html" : url.pathname;
   const filePath = join(Deno.cwd(), "public", pathname);
   try {
     const file = await Deno.readFile(filePath);
@@ -149,22 +146,13 @@ async function handler(req: Request): Promise<Response> {
 
 function contentType(ext: string) {
   switch (ext) {
-    case ".html":
-    case ".htm":
-      return "text/html; charset=utf-8";
-    case ".js":
-      return "application/javascript; charset=utf-8";
-    case ".css":
-      return "text/css; charset=utf-8";
-    case ".json":
-      return "application/json; charset=utf-8";
-    case ".png":
-      return "image/png";
-    case ".jpg":
-    case ".jpeg":
-      return "image/jpeg";
-    default:
-      return undefined;
+    case ".html": return "text/html; charset=utf-8";
+    case ".js": return "application/javascript; charset=utf-8";
+    case ".css": return "text/css; charset=utf-8";
+    case ".json": return "application/json; charset=utf-8";
+    case ".png": return "image/png";
+    case ".jpg": case ".jpeg": return "image/jpeg";
+    default: return undefined;
   }
 }
 
