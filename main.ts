@@ -2,6 +2,9 @@
 // Run: deno run --allow-net main.ts
 import { serve } from "https://deno.land/std@0.200.0/http/server.ts";
 
+let lastYtid = "";
+let lastUpdate = Date.now();
+
 interface Client {
   id: string;
   lat: number;
@@ -10,9 +13,7 @@ interface Client {
 }
 
 const clients = new Map<string, Client>();
-let lastYtid = ""; // latest YouTube ID
 
-// Helper: distance in meters
 function distance(lat1: number, lon1: number, lat2: number, lon2: number) {
   const R = 6371000;
   const toRad = (d: number) => (d * Math.PI) / 180;
@@ -26,12 +27,13 @@ function distance(lat1: number, lon1: number, lat2: number, lon2: number) {
   return R * 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
 }
 
-function handleWebSocket(req: Request) {
+function handleWS(req: Request) {
   const { socket, response } = Deno.upgradeWebSocket(req);
 
   socket.onmessage = (event) => {
     try {
       const data = JSON.parse(event.data);
+
       if (data.type === "update") {
         clients.set(data.id, {
           id: data.id,
@@ -42,67 +44,78 @@ function handleWebSocket(req: Request) {
 
         if (data.Ytid) {
           lastYtid = data.Ytid;
-          console.log("🎵 Received new YouTube ID:", lastYtid);
+          lastUpdate = Date.now();
+          console.log("🎵 Received via WS:", lastYtid);
         }
 
-        // Check nearby clients (100 meters)
+        // distance check
         for (const [otherId, c] of clients.entries()) {
           if (otherId === data.id) continue;
           const d = distance(data.lat, data.lon, c.lat, c.lon);
           if (d <= 100 && lastYtid) {
             try {
               c.ws.send(JSON.stringify({ type: "play", Ytid: lastYtid }));
-            } catch {}
-            try {
               socket.send(JSON.stringify({ type: "play", Ytid: lastYtid }));
             } catch {}
-            console.log(
-              `📡 ${data.id} ↔ ${otherId} within ${Math.round(
-                d
-              )}m — sharing ${lastYtid}`
-            );
+            console.log(`📡 Shared ${lastYtid} within ${Math.round(d)}m`);
           }
         }
       }
     } catch (err) {
-      console.error("❌ Invalid WS message:", err);
+      console.error("❌ Invalid WS msg:", err);
     }
   };
 
   socket.onclose = () => {
-    for (const [id, c] of clients.entries()) {
-      if (c.ws === socket) clients.delete(id);
-    }
+    for (const [id, c] of clients.entries()) if (c.ws === socket) clients.delete(id);
   };
 
   return response;
 }
 
-serve((req) => {
+serve(async (req) => {
   const url = new URL(req.url);
 
-  // 🟢 1. WebSocket endpoint
+  // 🟢 1. WebSocket
   if (url.pathname === "/ws" && req.headers.get("upgrade") === "websocket") {
-    return handleWebSocket(req);
+    return handleWS(req);
   }
 
-  // 🟢 2. Check endpoint — show current YouTube ID
+  // 🟢 2. Upload via REST API
+  if (url.pathname === "/upload" && req.method === "POST") {
+    try {
+      const body = await req.json();
+      if (body.Ytid) {
+        lastYtid = body.Ytid;
+        lastUpdate = Date.now();
+        console.log("📥 Received via HTTP:", lastYtid);
+        return new Response(JSON.stringify({ success: true, Ytid: lastYtid }), {
+          headers: { "content-type": "application/json" },
+        });
+      }
+      return new Response(JSON.stringify({ success: false, error: "Missing Ytid" }), {
+        headers: { "content-type": "application/json" },
+      });
+    } catch {
+      return new Response("Invalid JSON", { status: 400 });
+    }
+  }
+
+  // 🟢 3. Check endpoint
   if (url.pathname === "/check") {
     return new Response(
       lastYtid
-        ? `🎶 Current YouTube ID: ${lastYtid}`
-        : "⚠️ No YouTube ID uploaded yet.",
+        ? `🎶 Current Ytid: ${lastYtid}\n🕒 Updated: ${new Date(lastUpdate).toLocaleString()}`
+        : "⚠️ No Ytid uploaded yet.",
       { headers: { "content-type": "text/plain" } }
     );
   }
 
-  // 🟢 3. Default response
+  // 🟢 Default response
   return new Response(
-    "🎧 VFY proximity share server is running.\nUse /ws for WebSocket or /check to see latest YT ID.",
+    "🎧 VFY server running.\n/ws for WebSocket\n/upload for POST\n/check for latest ID",
     { headers: { "content-type": "text/plain" } }
   );
 }, { port: 8000 });
 
-console.log("🟢 Server running at:");
-console.log("   → ws://localhost:8000/ws");
-console.log("   → http://localhost:8000/check");
+console.log("🟢 Server running:\n  ws://localhost:8000/ws\n  POST /upload\n  GET /check");
