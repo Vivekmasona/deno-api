@@ -7,6 +7,7 @@ interface Client {
   lat: number;
   lon: number;
   Ytid?: string;
+  lastSentTo?: string; // last Ytid sent
 }
 
 const clients = new Map<string, Client>();
@@ -38,10 +39,11 @@ serve((req) => {
       lat: 0,
       lon: 0,
       Ytid: undefined,
+      lastSentTo: undefined,
     };
-
     clients.set(id, client);
-    console.log(`🔗 New client connected: ${id}`);
+
+    console.log("🔗 Connected:", id);
 
     socket.onmessage = (e) => {
       try {
@@ -53,7 +55,7 @@ serve((req) => {
           client.Ytid = msg.Ytid;
           clients.set(id, client);
 
-          // find nearby receivers for this sender
+          // Only if sender has valid new Ytid
           if (client.mode === "sender" && client.Ytid) {
             for (const other of clients.values()) {
               if (
@@ -61,13 +63,17 @@ serve((req) => {
                 nearMatch(client.lat, other.lat) &&
                 nearMatch(client.lon, other.lon)
               ) {
-                other.socket.send(
-                  JSON.stringify({
+                // send only if receiver hasn't received same Ytid before
+                if (other.lastSentTo !== client.Ytid) {
+                  console.log(`🎯 Sender ${client.id} → Receiver ${other.id} (${client.Ytid})`);
+                  other.socket.send(JSON.stringify({
                     type: "play",
                     Ytid: client.Ytid,
                     from: client.id,
-                  }),
-                );
+                  }));
+                  other.lastSentTo = client.Ytid;
+                  clients.set(other.id, other);
+                }
               }
             }
           }
@@ -79,7 +85,7 @@ serve((req) => {
 
     socket.onclose = () => {
       clients.delete(id);
-      console.log(`❌ Disconnected: ${id}`);
+      console.log("❌ Disconnected:", id);
     };
 
     return response;
@@ -88,12 +94,13 @@ serve((req) => {
   if (pathname === "/check") {
     return new Response(
       JSON.stringify(
-        Array.from(clients.values()).map((c) => ({
+        [...clients.values()].map((c) => ({
           id: c.id,
           mode: c.mode,
           lat: c.lat,
           lon: c.lon,
           Ytid: c.Ytid,
+          lastSentTo: c.lastSentTo,
         })),
         null,
         2,
@@ -102,7 +109,5 @@ serve((req) => {
     );
   }
 
-  return new Response("🎶 Realtime GeoSync WebSocket Server Active", {
-    headers: cors(),
-  });
+  return new Response("🎶 WebSocket GeoSync Server Ready", { headers: cors() });
 });
