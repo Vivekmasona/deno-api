@@ -3,44 +3,54 @@
 import { serve } from "https://deno.land/std@0.200.0/http/server.ts";
 
 const clients = new Map<string, any>();
-const cooldown = new Map<string, number>();
-const COOLDOWN_MS = 30_000;
-const RANGE = 100; // meters
+let lastYtid = ""; // Last YouTube video ID stored
 
-function dist(lat1:number, lon1:number, lat2:number, lon2:number) {
-  const R = 6371000, toRad = (d:number)=>d*Math.PI/180;
-  const dLat = toRad(lat2-lat1), dLon = toRad(lon2-lon1);
+function distance(lat1:number, lon1:number, lat2:number, lon2:number) {
+  const R = 6371000;
+  const toRad = (d:number)=>d*Math.PI/180;
+  const dLat = toRad(lat2-lat1);
+  const dLon = toRad(lon2-lon1);
   const a = Math.sin(dLat/2)**2 + Math.cos(toRad(lat1))*Math.cos(toRad(lat2))*Math.sin(dLon/2)**2;
   return R * 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1-a));
 }
 
-async function handler(req: Request) {
+function handleWS(req: Request) {
   const { socket, response } = Deno.upgradeWebSocket(req);
-  socket.onmessage = e => {
-    const msg = JSON.parse(e.data);
-    if (msg.type === "update") {
-      clients.set(msg.id, { ...msg, ws: socket, last: Date.now() });
-      for (const [id, c] of clients) {
-        if (id === msg.id || !c.lat || !c.lon) continue;
-        const d = dist(msg.lat, msg.lon, c.lat, c.lon);
-        if (d <= RANGE) {
-          const key = [id, msg.id].sort().join("|");
-          const last = cooldown.get(key) ?? 0;
-          if (Date.now() - last > COOLDOWN_MS) {
-            cooldown.set(key, Date.now());
-            try { c.ws.send(JSON.stringify({ type:"play", videoId: msg.videoId })); } catch {}
-            try { socket.send(JSON.stringify({ type:"play", videoId: c.videoId })); } catch {}
-            console.log(`Triggered play between ${id} and ${msg.id} (${Math.round(d)}m)`);
+
+  socket.onmessage = (ev) => {
+    try {
+      const data = JSON.parse(ev.data);
+      if (data.type === "update") {
+        clients.set(data.id, { ...data, ws: socket, last: Date.now() });
+
+        if (data.Ytid) lastYtid = data.Ytid; // update last YT id
+
+        for (const [otherId, c] of clients.entries()) {
+          if (otherId === data.id) continue;
+          const d = distance(data.lat, data.lon, c.lat, c.lon);
+          if (d <= 100 && lastYtid) {
+            // send latest YTID to both devices
+            try { c.ws.send(JSON.stringify({ type: "play", Ytid: lastYtid })); } catch {}
+            try { socket.send(JSON.stringify({ type: "play", Ytid: lastYtid })); } catch {}
+            console.log(`📡 Devices ${data.id} & ${otherId} within ${Math.round(d)}m → sharing ${lastYtid}`);
           }
         }
       }
+    } catch (e) {
+      console.error("Invalid WS message:", e);
     }
   };
+
+  socket.onclose = () => {
+    for (const [id, c] of clients.entries()) if (c.ws === socket) clients.delete(id);
+  };
+
   return response;
 }
 
-console.log("Server running on ws://localhost:8000/ws");
-await serve(req => {
-  if (req.headers.get("upgrade") === "websocket") return handler(req);
-  return new Response("Proximity server running");
+serve((req) => {
+  if (req.headers.get("upgrade") === "websocket") return handleWS(req);
+  return new Response("🎧 VFY proximity server running", { headers: { "content-type": "text/plain" } });
 }, { port: 8000 });
+
+console.log("🟢 Server running on ws://localhost:8000/ws");
