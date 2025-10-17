@@ -1,15 +1,16 @@
-// main.ts
+// main.ts — Deno WebSocket + location-based music pairing
 import { serve } from "https://deno.land/std@0.224.0/http/server.ts";
 
-interface DeviceData {
+interface Client {
   id: string;
-  Ytid: string;
+  socket: WebSocket;
+  mode: "sender" | "receiver";
   lat: number;
   lon: number;
-  last: number;
+  Ytid?: string;
 }
 
-const devices = new Map<string, DeviceData>();
+const clients = new Map<string, Client>();
 
 function cors() {
   return {
@@ -19,71 +20,66 @@ function cors() {
   };
 }
 
-// haversine distance (in meters)
-function distance(lat1: number, lon1: number, lat2: number, lon2: number) {
-  const R = 6371000;
-  const toRad = (d: number) => (d * Math.PI) / 180;
-  const dLat = toRad(lat2 - lat1);
-  const dLon = toRad(lon2 - lon1);
-  const a =
-    Math.sin(dLat / 2) ** 2 +
-    Math.cos(toRad(lat1)) * Math.cos(toRad(lat2)) * Math.sin(dLon / 2) ** 2;
-  return R * 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
+function nearMatch(a: number, b: number, diff = 10) {
+  return Math.abs(Math.round((a * 10000) % 10000) - Math.round((b * 10000) % 10000)) <= diff;
 }
 
-serve(async (req) => {
-  const url = new URL(req.url);
-  if (req.method === "OPTIONS") return new Response("ok", { headers: cors() });
+serve((req) => {
+  const { pathname } = new URL(req.url);
+  if (req.method === "OPTIONS")
+    return new Response("ok", { headers: cors() });
 
-  // 🟢 Upload location + Ytid
-  if (url.pathname === "/upload" && req.method === "POST") {
-    try {
-      const body = await req.json();
-      const id = body.device || crypto.randomUUID();
-      const Ytid = body.Ytid;
-      const lat = Number(body.lat);
-      const lon = Number(body.lon);
-      if (!Ytid || Ytid.length !== 11)
-        return new Response(JSON.stringify({ success: false, error: "Invalid Ytid" }), {
-          status: 400,
-          headers: { "content-type": "application/json", ...cors() },
-        });
+  if (pathname === "/ws") {
+    const { socket, response } = Deno.upgradeWebSocket(req);
 
-      devices.set(id, { id, Ytid, lat, lon, last: Date.now() });
+    const id = crypto.randomUUID();
+    let client: Client = { id, socket, mode: "receiver", lat: 0, lon: 0 };
 
-      // proximity match
-      let nearbyYtid: string | null = null;
-      for (const [otherId, d] of devices.entries()) {
-        if (otherId === id) continue;
-        const dist = distance(lat, lon, d.lat, d.lon);
-        if (dist <= 100) {
-          nearbyYtid = d.Ytid;
-          break;
+    socket.onmessage = (ev) => {
+      try {
+        const msg = JSON.parse(ev.data);
+        if (msg.type === "update") {
+          client.lat = msg.lat;
+          client.lon = msg.lon;
+          client.mode = msg.mode;
+          client.Ytid = msg.Ytid;
+          clients.set(id, client);
+
+          // match logic
+          if (client.mode === "sender" && client.Ytid) {
+            for (const other of clients.values()) {
+              if (
+                other.mode === "receiver" &&
+                nearMatch(client.lat, other.lat) &&
+                nearMatch(client.lon, other.lon)
+              ) {
+                console.log(`🎯 Matched sender ${client.id} → receiver ${other.id}`);
+                other.socket.send(JSON.stringify({
+                  type: "play",
+                  from: client.id,
+                  Ytid: client.Ytid,
+                }));
+              }
+            }
+          }
         }
+      } catch (e) {
+        console.error("Error:", e);
       }
+    };
 
-      return new Response(
-        JSON.stringify({
-          success: true,
-          device: id,
-          nearby: nearbyYtid,
-        }),
-        { headers: { "content-type": "application/json", ...cors() } },
-      );
-    } catch (err) {
-      return new Response(JSON.stringify({ success: false, error: err.message }), {
-        status: 500,
-        headers: { "content-type": "application/json", ...cors() },
-      });
-    }
+    socket.onclose = () => clients.delete(id);
+    return response;
   }
 
-  // 🟢 Check all (debug)
-  if (url.pathname === "/check") {
-    return new Response(JSON.stringify(Array.from(devices.values()), null, 2), {
+  // Debug endpoint
+  if (pathname === "/check") {
+    return new Response(JSON.stringify([...clients.values()].map(c => ({
+      id: c.id, mode: c.mode, lat: c.lat, lon: c.lon, Ytid: c.Ytid
+    })), null, 2), {
       headers: { "content-type": "application/json", ...cors() },
     });
   }
 
-  return new Response("🎧 Geo-share server active", { headers: cors() });
+  return new Response("🎵 WebSocket geo-sync active", { headers: cors() });
 });
