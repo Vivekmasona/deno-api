@@ -1,89 +1,112 @@
 // main.ts
+// deno run --allow-net main.ts
 import { serve } from "https://deno.land/std@0.224.0/http/server.ts";
 
-interface DeviceData {
+interface Client {
   id: string;
-  Ytid: string;
-  lat: number;
-  lon: number;
-  last: number;
+  ws: WebSocket;
+  // optional last known location (for passive matching if desired)
+  lat?: number;
+  lon?: number;
+  lastSeen: number;
 }
 
-const devices = new Map<string, DeviceData>();
+const clients = new Map<string, Client>();
+const PER_PAIR_COOLDOWN = 20_000; // 20s per pair
+const pairCooldown = new Map<string, number>();
 
-function cors() {
-  return {
-    "access-control-allow-origin": "*",
-    "access-control-allow-methods": "GET, POST, OPTIONS",
-    "access-control-allow-headers": "Content-Type",
-  };
-}
-
-// haversine distance (in meters)
-function distance(lat1: number, lon1: number, lat2: number, lon2: number) {
+function metersBetween(lat1:number, lon1:number, lat2:number, lon2:number) {
   const R = 6371000;
-  const toRad = (d: number) => (d * Math.PI) / 180;
-  const dLat = toRad(lat2 - lat1);
-  const dLon = toRad(lon2 - lon1);
-  const a =
-    Math.sin(dLat / 2) ** 2 +
-    Math.cos(toRad(lat1)) * Math.cos(toRad(lat2)) * Math.sin(dLon / 2) ** 2;
-  return R * 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
+  const toRad = (d:number)=>d*Math.PI/180;
+  const dLat = toRad(lat2-lat1), dLon = toRad(lon2-lon1);
+  const a = Math.sin(dLat/2)**2 + Math.cos(toRad(lat1))*Math.cos(toRad(lat2))*Math.sin(dLon/2)**2;
+  return R * 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1-a));
 }
 
-serve(async (req) => {
-  const url = new URL(req.url);
-  if (req.method === "OPTIONS") return new Response("ok", { headers: cors() });
+function handleWS(req: Request) {
+  const { socket, response } = Deno.upgradeWebSocket(req);
 
-  // 🟢 Upload location + Ytid
-  if (url.pathname === "/upload" && req.method === "POST") {
+  socket.onopen = () => { /* noop */ };
+
+  socket.onmessage = (ev) => {
     try {
-      const body = await req.json();
-      const id = body.device || crypto.randomUUID();
-      const Ytid = body.Ytid;
-      const lat = Number(body.lat);
-      const lon = Number(body.lon);
-      if (!Ytid || Ytid.length !== 11)
-        return new Response(JSON.stringify({ success: false, error: "Invalid Ytid" }), {
-          status: 400,
-          headers: { "content-type": "application/json", ...cors() },
-        });
+      const data = JSON.parse(ev.data);
+      const now = Date.now();
 
-      devices.set(id, { id, Ytid, lat, lon, last: Date.now() });
-
-      // proximity match
-      let nearbyYtid: string | null = null;
-      for (const [otherId, d] of devices.entries()) {
-        if (otherId === id) continue;
-        const dist = distance(lat, lon, d.lat, d.lon);
-        if (dist <= 100) {
-          nearbyYtid = d.Ytid;
-          break;
-        }
+      if (data.type === "register") {
+        const id = String(data.id || crypto.randomUUID());
+        clients.set(id, { id, ws: socket, lastSeen: now, lat: data.lat, lon: data.lon });
+        // ack
+        socket.send(JSON.stringify({ type: "registered", id }));
+        console.log("registered", id);
+        return;
       }
 
-      return new Response(
-        JSON.stringify({
-          success: true,
-          device: id,
-          nearby: nearbyYtid,
-        }),
-        { headers: { "content-type": "application/json", ...cors() } },
-      );
+      if (data.type === "announce") {
+        // announce: { type: "announce", id, lat, lon, Ytid }
+        const id = String(data.id || crypto.randomUUID());
+        const lat = Number(data.lat);
+        const lon = Number(data.lon);
+        const Ytid = String(data.Ytid || "");
+        // update caller lastSeen/loc
+        const caller = clients.get(id);
+        if (caller) { caller.lastSeen = now; caller.lat = lat; caller.lon = lon; }
+        // find nearby clients (only among currently connected ones)
+        for (const [otherId, other] of clients.entries()) {
+          if (otherId === id) continue;
+          if (other.lat == null || other.lon == null) continue;
+          const d = metersBetween(lat, lon, other.lat, other.lon);
+          if (d <= 100) {
+            // cooldown per pair
+            const key = [id, otherId].sort().join("|");
+            const last = pairCooldown.get(key) ?? 0;
+            if (now - last < PER_PAIR_COOLDOWN) continue;
+            pairCooldown.set(key, now);
+            // Forward to other: one-shot play message
+            try {
+              other.ws.send(JSON.stringify({ type: "play", from: id, Ytid }));
+            } catch (e) { /* ignore */ }
+            // also optionally inform announcer that forward sent
+            try {
+              socket.send(JSON.stringify({ type: "forwarded", to: otherId }));
+            } catch (e) {}
+            console.log(`forwarded Ytid ${Ytid} from ${id} -> ${otherId} (d=${Math.round(d)}m)`);
+          }
+        }
+        return;
+      }
+
+      if (data.type === "locupdate") {
+        // optional: clients can send locupdates infrequently to aid matching later
+        const id = String(data.id);
+        const c = clients.get(id);
+        if (c) { c.lat = Number(data.lat); c.lon = Number(data.lon); c.lastSeen = now; }
+        return;
+      }
+
     } catch (err) {
-      return new Response(JSON.stringify({ success: false, error: err.message }), {
-        status: 500,
-        headers: { "content-type": "application/json", ...cors() },
-      });
+      console.error("ws parse error", err);
     }
-  }
+  };
 
-  // 🟢 Check all (debug)
-  if (url.pathname === "/check") {
-    return new Response(JSON.stringify(Array.from(devices.values()), null, 2), {
-      headers: { "content-type": "application/json", ...cors() },
-    });
-  }
+  socket.onclose = () => {
+    // remove client(s) that used this socket
+    for (const [id, c] of clients.entries()) {
+      if (c.ws === socket) clients.delete(id);
+    }
+  };
 
-  return new Response("🎧 Geo-share server active", { headers: cors() });
-});
+  socket.onerror = (e) => console.error("ws err", e);
+
+  return response;
+}
+
+serve((req) => {
+  const url = new URL(req.url);
+  if (url.pathname === "/ws" && req.headers.get("upgrade") === "websocket") {
+    return handleWS(req);
+  }
+  return new Response("Proximity relay WS running");
+}, { port: 8000 });
+
+console.log("Server running ws://localhost:8000/ws");
