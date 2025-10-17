@@ -1,80 +1,70 @@
-// main.ts — Deno Deploy compatible
+// main.ts
 import { serve } from "https://deno.land/std@0.224.0/http/server.ts";
 
-let lastYtid = "";
-let lastUpdate = Date.now();
-
-// ✅ Helper to send JSON response with CORS
-function jsonResponse(data: unknown, status = 200) {
-  return new Response(JSON.stringify(data), {
-    status,
-    headers: {
-      "content-type": "application/json",
-      "access-control-allow-origin": "*",
-      "access-control-allow-methods": "GET, POST, OPTIONS",
-      "access-control-allow-headers": "Content-Type",
-    },
-  });
+interface DeviceData {
+  id: string;
+  Ytid: string;
+  updated: number;
 }
 
-// ✅ Helper to send plain text with CORS
-function textResponse(text: string, status = 200) {
-  return new Response(text, {
-    status,
-    headers: {
-      "content-type": "text/plain",
-      "access-control-allow-origin": "*",
-      "access-control-allow-methods": "GET, POST, OPTIONS",
-      "access-control-allow-headers": "Content-Type",
-    },
-  });
+const devices = new Map<string, DeviceData>();
+
+function corsHeaders() {
+  return {
+    "access-control-allow-origin": "*",
+    "access-control-allow-methods": "GET, POST, OPTIONS",
+    "access-control-allow-headers": "Content-Type",
+  };
 }
 
 serve(async (req) => {
   const url = new URL(req.url);
 
-  // Handle preflight CORS
+  // Handle CORS preflight
   if (req.method === "OPTIONS") {
-    return textResponse("ok");
+    return new Response("ok", { headers: corsHeaders() });
   }
 
-  // 🟢 Upload route
+  // 🟢 Upload endpoint
   if (url.pathname === "/upload" && req.method === "POST") {
     try {
       const body = await req.json();
-      if (body.Ytid) {
-        lastYtid = body.Ytid;
-        lastUpdate = Date.now();
-        console.log("📥 Ytid uploaded:", lastYtid);
-        return jsonResponse({ success: true, Ytid: lastYtid });
-      } else {
-        return jsonResponse({ success: false, error: "Missing Ytid" }, 400);
+      const deviceId = body.device || crypto.randomUUID(); // generate if missing
+      const Ytid = body.Ytid || "";
+
+      if (!Ytid || Ytid.length !== 11) {
+        return new Response(JSON.stringify({ success: false, error: "Invalid Ytid" }), {
+          status: 400,
+          headers: { "content-type": "application/json", ...corsHeaders() },
+        });
       }
+
+      devices.set(deviceId, { id: deviceId, Ytid, updated: Date.now() });
+      console.log(`📥 [${deviceId}] => ${Ytid}`);
+
+      return new Response(JSON.stringify({ success: true, device: deviceId }), {
+        headers: { "content-type": "application/json", ...corsHeaders() },
+      });
     } catch (err) {
-      console.error("❌ JSON error:", err);
-      return jsonResponse({ success: false, error: "Invalid JSON" }, 400);
+      return new Response(JSON.stringify({ success: false, error: err.message }), {
+        status: 500,
+        headers: { "content-type": "application/json", ...corsHeaders() },
+      });
     }
   }
 
-  // 🟢 Check route
+  // 🟢 Check endpoint (list all devices)
   if (url.pathname === "/check") {
-    if (lastYtid) {
-      return textResponse(
-        `✅ Current Ytid: ${lastYtid}\nUpdated: ${new Date(lastUpdate).toLocaleString()}`
-      );
-    } else {
-      return textResponse("⚠️ No Ytid uploaded yet.");
-    }
+    const all = Array.from(devices.values());
+    return new Response(
+      JSON.stringify({ count: all.length, devices: all }),
+      { headers: { "content-type": "application/json", ...corsHeaders() } },
+    );
   }
 
-  // 🟢 WebSocket route (optional)
-  if (url.pathname === "/ws" && req.headers.get("upgrade") === "websocket") {
-    const { socket, response } = Deno.upgradeWebSocket(req);
-    socket.onopen = () => console.log("🔌 WebSocket connected");
-    socket.onmessage = (ev) => console.log("📨 WS:", ev.data);
-    return response;
-  }
-
-  // 🟢 Default
-  return textResponse("🎧 API online: use /upload or /check");
+  // 🟢 Default info
+  return new Response(
+    "🎧 API running. POST /upload (device, Ytid), GET /check to see all.",
+    { headers: corsHeaders() },
+  );
 });
