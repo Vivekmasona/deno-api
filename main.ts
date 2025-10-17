@@ -1,121 +1,80 @@
-// main.ts
-// Run: deno run --allow-net main.ts
-import { serve } from "https://deno.land/std@0.200.0/http/server.ts";
+// main.ts — Deno Deploy compatible
+import { serve } from "https://deno.land/std@0.224.0/http/server.ts";
 
 let lastYtid = "";
 let lastUpdate = Date.now();
 
-interface Client {
-  id: string;
-  lat: number;
-  lon: number;
-  ws: WebSocket;
+// ✅ Helper to send JSON response with CORS
+function jsonResponse(data: unknown, status = 200) {
+  return new Response(JSON.stringify(data), {
+    status,
+    headers: {
+      "content-type": "application/json",
+      "access-control-allow-origin": "*",
+      "access-control-allow-methods": "GET, POST, OPTIONS",
+      "access-control-allow-headers": "Content-Type",
+    },
+  });
 }
 
-const clients = new Map<string, Client>();
-
-function distance(lat1: number, lon1: number, lat2: number, lon2: number) {
-  const R = 6371000;
-  const toRad = (d: number) => (d * Math.PI) / 180;
-  const dLat = toRad(lat2 - lat1);
-  const dLon = toRad(lon2 - lon1);
-  const a =
-    Math.sin(dLat / 2) ** 2 +
-    Math.cos(toRad(lat1)) *
-      Math.cos(toRad(lat2)) *
-      Math.sin(dLon / 2) ** 2;
-  return R * 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
-}
-
-function handleWS(req: Request) {
-  const { socket, response } = Deno.upgradeWebSocket(req);
-
-  socket.onmessage = (event) => {
-    try {
-      const data = JSON.parse(event.data);
-
-      if (data.type === "update") {
-        clients.set(data.id, {
-          id: data.id,
-          lat: data.lat,
-          lon: data.lon,
-          ws: socket,
-        });
-
-        if (data.Ytid) {
-          lastYtid = data.Ytid;
-          lastUpdate = Date.now();
-          console.log("🎵 Received via WS:", lastYtid);
-        }
-
-        // distance check
-        for (const [otherId, c] of clients.entries()) {
-          if (otherId === data.id) continue;
-          const d = distance(data.lat, data.lon, c.lat, c.lon);
-          if (d <= 100 && lastYtid) {
-            try {
-              c.ws.send(JSON.stringify({ type: "play", Ytid: lastYtid }));
-              socket.send(JSON.stringify({ type: "play", Ytid: lastYtid }));
-            } catch {}
-            console.log(`📡 Shared ${lastYtid} within ${Math.round(d)}m`);
-          }
-        }
-      }
-    } catch (err) {
-      console.error("❌ Invalid WS msg:", err);
-    }
-  };
-
-  socket.onclose = () => {
-    for (const [id, c] of clients.entries()) if (c.ws === socket) clients.delete(id);
-  };
-
-  return response;
+// ✅ Helper to send plain text with CORS
+function textResponse(text: string, status = 200) {
+  return new Response(text, {
+    status,
+    headers: {
+      "content-type": "text/plain",
+      "access-control-allow-origin": "*",
+      "access-control-allow-methods": "GET, POST, OPTIONS",
+      "access-control-allow-headers": "Content-Type",
+    },
+  });
 }
 
 serve(async (req) => {
   const url = new URL(req.url);
 
-  // 🟢 1. WebSocket
-  if (url.pathname === "/ws" && req.headers.get("upgrade") === "websocket") {
-    return handleWS(req);
+  // Handle preflight CORS
+  if (req.method === "OPTIONS") {
+    return textResponse("ok");
   }
 
-  // 🟢 2. Upload via REST API
+  // 🟢 Upload route
   if (url.pathname === "/upload" && req.method === "POST") {
     try {
       const body = await req.json();
       if (body.Ytid) {
         lastYtid = body.Ytid;
         lastUpdate = Date.now();
-        console.log("📥 Received via HTTP:", lastYtid);
-        return new Response(JSON.stringify({ success: true, Ytid: lastYtid }), {
-          headers: { "content-type": "application/json" },
-        });
+        console.log("📥 Ytid uploaded:", lastYtid);
+        return jsonResponse({ success: true, Ytid: lastYtid });
+      } else {
+        return jsonResponse({ success: false, error: "Missing Ytid" }, 400);
       }
-      return new Response(JSON.stringify({ success: false, error: "Missing Ytid" }), {
-        headers: { "content-type": "application/json" },
-      });
-    } catch {
-      return new Response("Invalid JSON", { status: 400 });
+    } catch (err) {
+      console.error("❌ JSON error:", err);
+      return jsonResponse({ success: false, error: "Invalid JSON" }, 400);
     }
   }
 
-  // 🟢 3. Check endpoint
+  // 🟢 Check route
   if (url.pathname === "/check") {
-    return new Response(
-      lastYtid
-        ? `🎶 Current Ytid: ${lastYtid}\n🕒 Updated: ${new Date(lastUpdate).toLocaleString()}`
-        : "⚠️ No Ytid uploaded yet.",
-      { headers: { "content-type": "text/plain" } }
-    );
+    if (lastYtid) {
+      return textResponse(
+        `✅ Current Ytid: ${lastYtid}\nUpdated: ${new Date(lastUpdate).toLocaleString()}`
+      );
+    } else {
+      return textResponse("⚠️ No Ytid uploaded yet.");
+    }
   }
 
-  // 🟢 Default response
-  return new Response(
-    "🎧 VFY server running.\n/ws for WebSocket\n/upload for POST\n/check for latest ID",
-    { headers: { "content-type": "text/plain" } }
-  );
-}, { port: 8000 });
+  // 🟢 WebSocket route (optional)
+  if (url.pathname === "/ws" && req.headers.get("upgrade") === "websocket") {
+    const { socket, response } = Deno.upgradeWebSocket(req);
+    socket.onopen = () => console.log("🔌 WebSocket connected");
+    socket.onmessage = (ev) => console.log("📨 WS:", ev.data);
+    return response;
+  }
 
-console.log("🟢 Server running:\n  ws://localhost:8000/ws\n  POST /upload\n  GET /check");
+  // 🟢 Default
+  return textResponse("🎧 API online: use /upload or /check");
+});
