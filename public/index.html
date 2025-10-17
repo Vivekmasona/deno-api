@@ -1,147 +1,49 @@
 <!doctype html>
 <html>
 <head>
-  <meta charset="utf-8" />
-  <title>Deno Proximity Demo</title>
-  <meta name="viewport" content="width=device-width,initial-scale=1" />
-  <style>
-    body { font-family: system-ui, -apple-system, Arial; padding:20px; }
-    #log { margin-top:12px; border:1px solid #ddd; padding:8px; height:150px; overflow:auto; }
-    .btn { padding:8px 12px; border-radius:6px; border:1px solid #333; cursor:pointer; }
-    /* simple modal */
-    #modal {
-      position: fixed; left:50%; top:20%; transform: translateX(-50%); min-width:220px;
-      background: white; border: 2px solid #333; padding: 16px; box-shadow: 0 8px 24px rgba(0,0,0,0.2);
-      display:none; z-index:9999;
-      text-align:center; font-size:18px;
-    }
-  </style>
+  <meta charset="utf-8">
+  <title>100 m Proximity Demo</title>
 </head>
 <body>
-  <h2>Deno Proximity Demo (auto 100m check)</h2>
-  <p>Enter name, allow geolocation. If anyone comes within 100m, you'll see a popup automatically.</p>
-
-  <label>Your name:
-    <input id="name" placeholder="Type your name" />
-  </label>
-  <button id="start" class="btn">Start</button>
-  <button id="stop" class="btn" disabled>Stop</button>
-
-  <div id="status">Status: disconnected</div>
-  <div id="log"></div>
-
-  <div id="modal"></div>
+  <h3>Enter your name:</h3>
+  <input id="name" placeholder="Your name">
+  <button id="start">Start</button>
+  <pre id="log"></pre>
 
   <script>
-    const startBtn = document.getElementById("start");
-    const stopBtn = document.getElementById("stop");
-    const nameInput = document.getElementById("name");
-    const statusEl = document.getElementById("status");
-    const logEl = document.getElementById("log");
-    const modal = document.getElementById("modal");
+    const id = localStorage.getItem("id") || crypto.randomUUID();
+    localStorage.setItem("id", id);
+    let ws, timer;
+    const log = (t) => document.getElementById("log").textContent += t + "\n";
 
-    let ws;
-    let myId = localStorage.getItem("myId") || crypto.randomUUID();
-    localStorage.setItem("myId", myId);
-    let sendPosInterval = null;
-    const UPDATE_INTERVAL_MS = 2000; // 2 seconds - adjust if needed
-
-    function log(msg) {
-      const d = new Date().toLocaleTimeString();
-      logEl.innerHTML = `<div>[${d}] ${msg}</div>` + logEl.innerHTML;
-    }
-
-    function showModalWithName(name, distance) {
-      // show non-blocking modal with name repeated 3 times
-      modal.textContent = `${name} ${name} ${name} — ${distance} m`;
-      modal.style.display = "block";
-      // hide after 5 seconds
-      setTimeout(() => { modal.style.display = "none"; }, 5000);
-    }
-
-    function connect() {
-      const name = nameInput.value.trim() || "Anonymous";
-      ws = new WebSocket((location.protocol === "https:" ? "wss://" : "ws://") + location.host + "/ws");
+    document.getElementById("start").onclick = () => {
+      const name = document.getElementById("name").value || "Anon";
+      ws = new WebSocket("ws://" + location.host);
       ws.onopen = () => {
-        statusEl.textContent = "Status: connected";
-        startBtn.disabled = true;
-        stopBtn.disabled = false;
-        // Immediately get current position and register with it
-        if (navigator.geolocation) {
-          navigator.geolocation.getCurrentPosition((pos) => {
-            const lat = pos.coords.latitude;
-            const lon = pos.coords.longitude;
-            ws.send(JSON.stringify({ type: "register", id: myId, name, lat, lon }));
-            log("Registered (with initial location)");
-          }, (err) => {
-            // fallback register without location
-            ws.send(JSON.stringify({ type: "register", id: myId, name }));
-            log("Registered (no initial location) - geolocation error: " + err.message);
-          }, { enableHighAccuracy: true, maximumAge: 5000, timeout: 10000 });
-        } else {
-          ws.send(JSON.stringify({ type: "register", id: myId, name }));
-          log("Registered (geolocation not supported)");
-        }
-
-        // start sending location regularly
-        sendLocation(); // immediate
-        sendPosInterval = setInterval(sendLocation, UPDATE_INTERVAL_MS);
+        ws.send(JSON.stringify({ type: "register", id, name }));
+        log("Connected as " + name);
+        timer = setInterval(sendLocation, 2000);
       };
-
-      ws.onmessage = (ev) => {
-        try {
-          const data = JSON.parse(ev.data);
-          if (data.type === "registered") {
-            myId = data.id;
-            localStorage.setItem("myId", myId);
-            log("Registered with id " + myId);
-          } else if (data.type === "proximity") {
-            const nm = data.withName || "Someone";
-            showModalWithName(nm, data.distanceMeters ?? "?");
-            log(`Proximity alert: ${nm} (${data.distanceMeters} m)`);
-          }
-        } catch (e) {
-          console.error(e);
+      ws.onmessage = (e) => {
+        const msg = JSON.parse(e.data);
+        if (msg.type === "near") {
+          alert(`${msg.name} ${msg.name} ${msg.name} (${msg.distance} m)`);
         }
       };
-
-      ws.onclose = () => {
-        statusEl.textContent = "Status: disconnected";
-        startBtn.disabled = false;
-        stopBtn.disabled = true;
-        log("WebSocket closed");
-        if (sendPosInterval) { clearInterval(sendPosInterval); sendPosInterval = null; }
-      };
-      ws.onerror = (e) => {
-        log("WebSocket error");
-        console.error(e);
-      };
-    }
+      ws.onclose = () => clearInterval(timer);
+    };
 
     function sendLocation() {
-      if (!ws || ws.readyState !== WebSocket.OPEN) return;
-      const name = nameInput.value.trim() || "Anonymous";
-      if (!navigator.geolocation) {
-        log("Geolocation not supported");
-        return;
-      }
-      navigator.geolocation.getCurrentPosition((pos) => {
-        const lat = pos.coords.latitude;
-        const lon = pos.coords.longitude;
-        ws.send(JSON.stringify({ type: "update", id: myId, name, lat, lon }));
-        log(`Sent position: ${lat.toFixed(6)}, ${lon.toFixed(6)}`);
-      }, (err) => {
-        log("Geolocation error: " + err.message);
-      }, { enableHighAccuracy: true, maximumAge: 1000, timeout: 10000 });
+      if (!navigator.geolocation) return;
+      navigator.geolocation.getCurrentPosition((p) => {
+        ws.send(JSON.stringify({
+          type: "update",
+          id,
+          lat: p.coords.latitude,
+          lon: p.coords.longitude,
+        }));
+      });
     }
-
-    startBtn.addEventListener("click", () => connect());
-    stopBtn.addEventListener("click", () => {
-      if (ws && ws.readyState === WebSocket.OPEN) {
-        ws.send(JSON.stringify({ type: "unregister", id: myId }));
-        ws.close();
-      }
-    });
   </script>
 </body>
 </html>
