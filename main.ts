@@ -1,125 +1,108 @@
 // main.ts
-// Run: deno run --allow-net main.ts
 import { serve } from "https://deno.land/std@0.224.0/http/server.ts";
 
-interface Client {
+interface Device {
   id: string;
-  ws: WebSocket;
-  mode: "share" | "receive";
   lat?: number;
   lon?: number;
-  lastSeen: number;
+  mode?: "share" | "receive";
+  socket: WebSocket;
 }
 
-const clients = new Map<string, Client>();
-const PAIR_COOLDOWN = 20_000; // ms
-const pairCooldown = new Map<string, number>();
+const devices: Map<string, Device> = new Map();
 
-function now() { return Date.now(); }
+// 🧭 Distance calculation
+function distance(lat1: number, lon1: number, lat2: number, lon2: number) {
+  const R = 6371000; // meters
+  const φ1 = lat1 * Math.PI / 180;
+  const φ2 = lat2 * Math.PI / 180;
+  const Δφ = (lat2 - lat1) * Math.PI / 180;
+  const Δλ = (lon2 - lon1) * Math.PI / 180;
 
-// Haversine distance in meters
-function metersBetween(lat1:number, lon1:number, lat2:number, lon2:number) {
-  const R = 6371000;
-  const toRad = (d:number) => d * Math.PI / 180;
-  const dLat = toRad(lat2 - lat1), dLon = toRad(lon2 - lon1);
-  const a = Math.sin(dLat/2)**2 + Math.cos(toRad(lat1)) * Math.cos(toRad(lat2)) * Math.sin(dLon/2)**2;
-  return R * 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1-a));
+  const a = Math.sin(Δφ / 2) ** 2 +
+            Math.cos(φ1) * Math.cos(φ2) * Math.sin(Δλ / 2) ** 2;
+  return R * 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
 }
 
-function handleWS(req: Request) {
-  const { socket, response } = Deno.upgradeWebSocket(req);
+// 🔌 Handle WebSocket connections
+serve((req) => {
+  const { pathname } = new URL(req.url);
 
-  socket.onopen = () => { /* noop */ };
+  // 🧠 Test route
+  if (pathname === "/check") {
+    return new Response("✅ Server running fine");
+  }
 
-  socket.onmessage = (ev) => {
-    try {
-      const data = JSON.parse(ev.data);
-      const nowTs = now();
+  // 🔄 WebSocket endpoint
+  if (pathname === "/ws") {
+    const { socket, response } = Deno.upgradeWebSocket(req);
 
-      if (data.type === "register") {
-        const id = String(data.id || crypto.randomUUID());
-        clients.set(id, { id, ws: socket, mode: "receive", lastSeen: nowTs });
-        // ack with assigned id (so client can store)
-        socket.send(JSON.stringify({ type: "registered", id }));
-        console.log("registered", id);
-        return;
-      }
+    socket.onopen = () => console.log("🟢 Client connected");
 
-      if (data.type === "mode") {
-        const id = String(data.id);
-        const c = clients.get(id);
-        if (c) { c.mode = data.mode === "share" ? "share" : "receive"; c.lastSeen = nowTs; }
-        return;
-      }
+    socket.onmessage = (e) => {
+      try {
+        const msg = JSON.parse(e.data);
 
-      if (data.type === "locupdate") {
-        const id = String(data.id);
-        const c = clients.get(id);
-        if (c) { c.lat = Number(data.lat); c.lon = Number(data.lon); c.lastSeen = nowTs; }
-        return;
-      }
+        // Register device
+        if (msg.type === "register") {
+          devices.set(msg.id, { id: msg.id, socket, mode: msg.mode });
+          broadcastDeviceList();
+        }
 
-      // announce: sender asks server to forward its Ytid to nearby receivers
-      if (data.type === "announce") {
-        const id = String(data.id);
-        const Ytid = String(data.Ytid || "");
-        const lat = Number(data.lat);
-        const lon = Number(data.lon);
-        if (!Ytid || Ytid.length !== 11) return;
-        // update announcer loc
-        const announcer = clients.get(id);
-        if (announcer) { announcer.lat = lat; announcer.lon = lon; announcer.lastSeen = nowTs; }
+        // Update mode
+        if (msg.type === "mode") {
+          const d = devices.get(msg.id);
+          if (d) d.mode = msg.mode;
+          broadcastDeviceList();
+        }
 
-        // find nearby receivers and forward
-        for (const [otherId, other] of clients.entries()) {
-          if (otherId === id) continue;
-          if (!other.lat || !other.lon) continue;
-          if (other.mode !== "receive") continue; // only forward to receivers
-          const d = metersBetween(lat, lon, other.lat!, other.lon!);
-          if (d <= 100) {
-            const key = [id, otherId].sort().join("|");
-            const last = pairCooldown.get(key) ?? 0;
-            if (nowTs - last < PAIR_COOLDOWN) continue;
-            pairCooldown.set(key, nowTs);
-            // forward play message
-            try {
-              other.ws.send(JSON.stringify({ type: "play", from: id, Ytid }));
-            } catch (_e) {}
-            // notify announcer someone was forwarded to (optional)
-            try {
-              socket.send(JSON.stringify({ type: "forwarded", to: otherId, Ytid }));
-            } catch (_e) {}
-            console.log(`forwarded ${Ytid} from ${id} -> ${otherId} (${Math.round(d)}m)`);
+        // Update geolocation
+        if (msg.type === "position") {
+          const d = devices.get(msg.id);
+          if (d) {
+            d.lat = msg.lat;
+            d.lon = msg.lon;
+            d.mode = msg.mode;
+          }
+          broadcastDeviceList();
+        }
+
+        // Play/share ID
+        if (msg.type === "play") {
+          const to = devices.get(msg.to);
+          if (to) {
+            to.socket.send(JSON.stringify({ type: "play", Ytid: msg.Ytid }));
           }
         }
-        return;
+      } catch (err) {
+        console.error("Parse error:", err);
       }
+    };
 
-    } catch (err) {
-      console.error("ws msg parse error", err);
-    }
-  };
+    socket.onclose = () => {
+      for (const [id, d] of devices.entries()) {
+        if (d.socket === socket) devices.delete(id);
+      }
+      broadcastDeviceList();
+    };
 
-  socket.onclose = () => {
-    // remove any clients that used this socket
-    for (const [id, c] of clients.entries()) {
-      if (c.ws === socket) clients.delete(id);
-    }
-  };
-
-  socket.onerror = (e) => {
-    console.error("ws error", e);
-  };
-
-  return response;
-}
-
-serve((req) => {
-  const url = new URL(req.url);
-  if (url.pathname === "/ws" && req.headers.get("upgrade") === "websocket") {
-    return handleWS(req);
+    return response;
   }
-  return new Response("Proximity relay WS running");
-}, { port: 8000 });
 
-console.log("Server running ws://localhost:8000/ws");
+  return new Response("404 Not Found", { status: 404 });
+});
+
+// 📡 Broadcast all connected devices (lightweight)
+function broadcastDeviceList() {
+  const list = Array.from(devices.values()).map(d => ({
+    id: d.id, lat: d.lat, lon: d.lon, mode: d.mode,
+  }));
+
+  for (const d of devices.values()) {
+    try {
+      d.socket.send(JSON.stringify({ type: "devices", devices: list }));
+    } catch {
+      devices.delete(d.id);
+    }
+  }
+}
