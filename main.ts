@@ -1,4 +1,4 @@
-// === Nearby Sync Server (Deno) ===
+// === Nearby YouTube Sync Server (Deno) ===
 // Run: deno run --allow-net main.ts
 
 import { serve } from "https://deno.land/std@0.224.0/http/server.ts";
@@ -8,12 +8,14 @@ interface Client {
   socket: WebSocket;
   lat?: number;
   lon?: number;
-  mode: "sender" | "receiver";
+  lastYtid?: string;
+  mode?: "sender" | "receiver";
 }
 
 const clients: Client[] = [];
-const RANGE = 50; // meters
+const RANGE = 50; // meters (pair distance)
 
+// --- Distance helper ---
 function calcDistance(lat1: number, lon1: number, lat2: number, lon2: number) {
   const R = 6371e3;
   const φ1 = (lat1 * Math.PI) / 180;
@@ -26,97 +28,112 @@ function calcDistance(lat1: number, lon1: number, lat2: number, lon2: number) {
   return R * 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
 }
 
-// 🛰️ MAIN SERVER
-serve(async (req) => {
-  const { pathname } = new URL(req.url);
-
-  // ✅ Allow browser preflight
+// --- Main Server ---
+serve((req) => {
+  // Handle OPTIONS preflight for CORS
   if (req.method === "OPTIONS") {
-    return new Response(null, {
-      status: 204,
-      headers: corsHeaders(),
-    });
+    return new Response(null, { status: 204, headers: corsHeaders() });
   }
 
-  // ✅ WebSocket Upgrade route
-  if (pathname === "/") {
-    const upgrade = Deno.upgradeWebSocket(req, {
-      headers: corsHeaders(),
-    });
-    const socket = upgrade.socket;
+  const { socket, response } = Deno.upgradeWebSocket(req, {
+    headers: corsHeaders(),
+  });
+  const client: Client = { id: crypto.randomUUID(), socket, mode: "receiver" };
+  clients.push(client);
 
-    const client: Client = {
-      id: crypto.randomUUID(),
-      socket,
-      mode: "receiver",
-    };
-    clients.push(client);
-    console.log("🟢 Connected:", client.id);
+  socket.onopen = () => {
+    console.log("🟢 Client connected:", client.id);
+    socket.send(JSON.stringify({ type: "welcome", id: client.id }));
+  };
 
-    socket.onopen = () => {
-      socket.send(JSON.stringify({ type: "welcome", id: client.id }));
-    };
+  socket.onmessage = (e) => {
+    try {
+      const msg = JSON.parse(e.data);
 
-    socket.onmessage = (e) => {
-      try {
-        const msg = JSON.parse(e.data);
-
-        if (msg.type === "mode") {
-          client.mode = msg.mode === "sender" ? "sender" : "receiver";
-          console.log(`🔁 ${client.id} is now ${client.mode}`);
-        }
-
-        if (msg.type === "updateLocation") {
-          client.lat = msg.lat;
-          client.lon = msg.lon;
-        }
-
-        if (msg.type === "songClick") {
-          console.log(`🎵 Sender ${client.id} clicked: ${msg.data.snippet?.title}`);
-          broadcastToNearby(client, msg.data);
-        }
-      } catch (err) {
-        console.error("⚠️ Message parse error:", err);
+      // Mode toggle
+      if (msg.type === "mode") {
+        client.mode = msg.mode === "sender" ? "sender" : "receiver";
+        console.log(`🔁 ${client.id} set to ${client.mode}`);
       }
-    };
 
-    socket.onclose = () => {
-      const i = clients.findIndex((c) => c.id === client.id);
-      if (i >= 0) clients.splice(i, 1);
-      console.log("🔴 Disconnected:", client.id);
-    };
+      // Location update
+      if (msg.type === "updateLocation") {
+        client.lat = msg.lat;
+        client.lon = msg.lon;
+      }
 
-    return upgrade.response;
-  }
-
-  // ✅ Fallback for browser test
-  return new Response(
-    "Nearby Sync WebSocket Server Active ✅",
-    { headers: corsHeaders() }
-  );
-}, { port: 8000 });
-
-// 🧠 Helper — broadcast song info to nearby receivers
-function broadcastToNearby(sender: Client, songData: any) {
-  for (const rec of clients) {
-    if (rec.id === sender.id || rec.mode !== "receiver") continue;
-
-    if (sender.lat && sender.lon && rec.lat && rec.lon) {
-      const dist = calcDistance(sender.lat, sender.lon, rec.lat, rec.lon);
-      if (dist > RANGE) continue;
+      // Sender clicked a song (full info)
+      if (msg.type === "songClick" && msg.data) {
+        client.lastYtid = msg.data.id;
+        console.log(`🎵 Sender ${client.id}: ${msg.data.snippet?.title}`);
+        sendSongToNearbyReceivers(client, msg.data);
+      }
+    } catch (err) {
+      console.error("⚠️ Parse error:", err);
     }
+  };
 
-    rec.socket.send(JSON.stringify({ type: "addSong", data: songData }));
-    console.log(`📡 Sent "${songData.snippet?.title}" → ${rec.id}`);
+  socket.onclose = () => {
+    const i = clients.findIndex((c) => c.id === client.id);
+    if (i >= 0) clients.splice(i, 1);
+    console.log("🔴 Client left:", client.id);
+  };
+
+  return response;
+}, {
+  port: 8000,
+  onListen: () => console.log("🚀 Server running on :8000"),
+  handler: (_req) =>
+    new Response("OK", {
+      headers: corsHeaders(),
+    }),
+});
+
+// --- Send to Nearby Receivers ---
+function sendSongToNearbyReceivers(sender: Client, songData: any) {
+  if (!sender.lat || !sender.lon) return;
+  for (const rec of clients) {
+    if (rec.id === sender.id || rec.mode === "sender") continue;
+    if (!rec.lat || !rec.lon) continue;
+
+    const d = calcDistance(sender.lat, sender.lon, rec.lat, rec.lon);
+    if (d <= RANGE) {
+      try {
+        // Send full song info to receiver
+        rec.socket.send(
+          JSON.stringify({ type: "addSong", data: songData }),
+        );
+
+        // Feedback both sides
+        sender.socket.send(
+          JSON.stringify({
+            type: "paired",
+            from: sender.id,
+            to: rec.id,
+            dist: Math.round(d),
+          }),
+        );
+        rec.socket.send(
+          JSON.stringify({
+            type: "paired",
+            from: sender.id,
+            to: rec.id,
+            dist: Math.round(d),
+          }),
+        );
+        console.log(`🔗 Paired ${sender.id} ↔ ${rec.id} @ ${Math.round(d)}m`);
+      } catch (err) {
+        console.error("Send error:", err);
+      }
+    }
   }
 }
 
-// ✅ Proper CORS headers (for frontend connection)
+// --- CORS Headers ---
 function corsHeaders(): HeadersInit {
   return {
-    "Access-Control-Allow-Origin": "*", // allow all
+    "Access-Control-Allow-Origin": "*",
     "Access-Control-Allow-Methods": "GET, POST, OPTIONS",
     "Access-Control-Allow-Headers": "Content-Type, Authorization",
-    "Access-Control-Allow-Credentials": "true",
   };
 }
