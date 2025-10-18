@@ -1,81 +1,39 @@
-// main.ts — WebSocket + Geo pairing + Sync System
-import { serve } from "https://deno.land/std@0.202.0/http/server.ts";
+// === Nearby YouTube Sync Server (Deno) ===
+// Run: deno run --allow-net main.ts
+
+import { serve } from "https://deno.land/std@0.224.0/http/server.ts";
 
 interface Client {
   id: string;
   socket: WebSocket;
   lat?: number;
   lon?: number;
-  Ytid?: string;
-  lastReceivedFrom: Map<string, string>;
+  lastYtid?: string;
 }
 
-const clients = new Map<string, Client>();
-const DISTANCE_THRESHOLD_M = 100; // 100 meter range
+const clients: Client[] = [];
+const RANGE = 50; // meters (pair distance)
 
-// Distance formula (Haversine)
-function distance(lat1: number, lon1: number, lat2: number, lon2: number) {
-  const R = 6371000;
-  const dLat = ((lat2 - lat1) * Math.PI) / 180;
-  const dLon = ((lon2 - lon1) * Math.PI) / 180;
-  const a =
-    Math.sin(dLat / 2) ** 2 +
-    Math.cos((lat1 * Math.PI) / 180) *
-      Math.cos((lat2 * Math.PI) / 180) *
-      Math.sin(dLon / 2) ** 2;
+function calcDistance(lat1: number, lon1: number, lat2: number, lon2: number) {
+  const R = 6371e3;
+  const φ1 = (lat1 * Math.PI) / 180;
+  const φ2 = (lat2 * Math.PI) / 180;
+  const Δφ = ((lat2 - lat1) * Math.PI) / 180;
+  const Δλ = ((lon2 - lon1) * Math.PI) / 180;
+  const a = Math.sin(Δφ / 2) ** 2 +
+    Math.cos(φ1) * Math.cos(φ2) * Math.sin(Δλ / 2) ** 2;
   return R * 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
 }
 
-// Pair alert
-function notifyPair(sender: Client, receiver: Client) {
-  const data = {
-    type: "paired",
-    from: sender.id,
-    to: receiver.id,
-    ts: Date.now(),
-  };
-  try { sender.socket.send(JSON.stringify(data)); } catch {}
-  try { receiver.socket.send(JSON.stringify(data)); } catch {}
-  console.log(`🔗 Pair established between ${sender.id} and ${receiver.id}`);
-}
-
-// When sender updates YouTube ID
-function handleSenderNewYtid(sender: Client) {
-  for (const [_, c] of clients) {
-    if (c.id === sender.id || !c.lat || !c.lon || !sender.lat || !sender.lon)
-      continue;
-
-    const d = distance(sender.lat, sender.lon, c.lat, c.lon);
-    if (d <= DISTANCE_THRESHOLD_M) {
-      notifyPair(sender, c);
-      const last = c.lastReceivedFrom.get(sender.id);
-      if (last === sender.Ytid) continue;
-      sendToReceiver(c, sender.id, sender.Ytid!);
-    }
-  }
-}
-
-// Send song ID to receiver
-function sendToReceiver(receiver: Client, from: string, id: string) {
-  try {
-    receiver.socket.send(JSON.stringify({ type: "update", from, id }));
-    receiver.lastReceivedFrom.set(from, id);
-  } catch {}
-}
-
+// --- Handle socket upgrade ---
 serve((req) => {
   const { socket, response } = Deno.upgradeWebSocket(req);
-  const id = crypto.randomUUID();
-  const client: Client = {
-    id,
-    socket,
-    lastReceivedFrom: new Map(),
-  };
-  clients.set(id, client);
+  const client: Client = { id: crypto.randomUUID(), socket };
+  clients.push(client);
 
   socket.onopen = () => {
-    console.log("✅ Client connected:", id);
-    socket.send(JSON.stringify({ type: "welcome", id }));
+    console.log("Client connected:", client.id);
+    socket.send(JSON.stringify({ type: "welcome", id: client.id }));
   };
 
   socket.onmessage = (e) => {
@@ -84,9 +42,13 @@ serve((req) => {
       if (msg.type === "updateLocation") {
         client.lat = msg.lat;
         client.lon = msg.lon;
-      } else if (msg.type === "sender" && msg.Ytid) {
-        client.Ytid = msg.Ytid;
-        handleSenderNewYtid(client);
+      }
+
+      // When sender sends video id
+      if (msg.type === "sender" && msg.Ytid) {
+        client.lastYtid = msg.Ytid;
+        console.log(`🎵 Sender ${client.id}: ${msg.Ytid}`);
+        checkNearby(client);
       }
     } catch (err) {
       console.error("Parse error:", err);
@@ -94,9 +56,48 @@ serve((req) => {
   };
 
   socket.onclose = () => {
-    console.log("❌ Disconnected:", id);
-    clients.delete(id);
+    const i = clients.findIndex((c) => c.id === client.id);
+    if (i >= 0) clients.splice(i, 1);
+    console.log("Client left:", client.id);
   };
 
   return response;
+}, {
+  port: 8000,
+  onListen: () => console.log("🚀 Server running on :8000"),
+  handler: (_req) => new Response("OK", {
+    headers: {
+      "Access-Control-Allow-Origin": "*",
+      "Access-Control-Allow-Methods": "GET, POST, OPTIONS",
+      "Access-Control-Allow-Headers": "Content-Type",
+    },
+  }),
 });
+
+function checkNearby(sender: Client) {
+  if (!sender.lat || !sender.lon) return;
+  for (const rec of clients) {
+    if (rec.id === sender.id || !rec.lat || !rec.lon) continue;
+    const d = calcDistance(sender.lat, sender.lon, rec.lat, rec.lon);
+    if (d <= RANGE) {
+      try {
+        rec.socket.send(JSON.stringify({ type: "update", id: sender.lastYtid }));
+        sender.socket.send(JSON.stringify({
+          type: "paired",
+          from: sender.id,
+          to: rec.id,
+          dist: Math.round(d),
+        }));
+        rec.socket.send(JSON.stringify({
+          type: "paired",
+          from: sender.id,
+          to: rec.id,
+          dist: Math.round(d),
+        }));
+        console.log(`🔗 Paired ${sender.id} ↔ ${rec.id} @ ${Math.round(d)}m`);
+      } catch (err) {
+        console.error("Send error:", err);
+      }
+    }
+  }
+}
