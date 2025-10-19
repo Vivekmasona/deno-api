@@ -1,15 +1,13 @@
-// === Global FM Server v2.1 (CORS + Binary Sync) ===
+// === GLOBAL FM v3.0 — Live Broadcast Server ===
 // Run: deno run --allow-net main.ts
 
 import { serve } from "https://deno.land/std@0.224.0/http/server.ts";
 
 const clients = new Set<WebSocket>();
 
-function sendAll(data: string | ArrayBuffer, except?: WebSocket) {
+function sendAll(msg: string | ArrayBuffer, except?: WebSocket) {
   for (const c of clients) {
-    if (c.readyState === WebSocket.OPEN && c !== except) {
-      c.send(data);
-    }
+    if (c.readyState === WebSocket.OPEN && c !== except) c.send(msg);
   }
 }
 
@@ -26,9 +24,9 @@ serve((req) => {
     });
   }
 
-  // ✅ Normal HTTP request (not WebSocket)
+  // ✅ Normal HTTP request
   if (req.headers.get("upgrade") !== "websocket") {
-    return new Response("🎧 Global FM v2.1 running", {
+    return new Response("🎧 Global FM v3.0 is LIVE", {
       headers: {
         "Access-Control-Allow-Origin": "*",
         "Content-Type": "text/plain",
@@ -36,18 +34,13 @@ serve((req) => {
     });
   }
 
-  // ✅ WebSocket connection
+  // ✅ WebSocket upgrade
   const { socket, response } = Deno.upgradeWebSocket(req);
   clients.add(socket);
 
-  socket.onopen = () => {
-    console.log("Client connected:", clients.size);
-  };
+  socket.onmessage = (e) => sendAll(e.data, socket);
+  socket.onclose = () => clients.delete(socket);
+  socket.onerror = () => clients.delete(socket);
 
-  socket.onmessage = (e) => {
-    // Forward same message (song meta + chunks)
-    sendAll(e.data, socket);
-  };
-
-  socket.onclose = () => {
-    clients.delete(socket);
+  return response;
+});
