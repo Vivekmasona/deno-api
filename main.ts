@@ -1,85 +1,52 @@
-// === VFY Auto-Live FM Server ===
+// stream_server.ts
 import { serve } from "https://deno.land/std@0.224.0/http/server.ts";
 
-interface Client {
-  id: string;
-  ws: WebSocket;
-  role?: "broadcaster" | "listener";
-}
-const clients = new Map<string, Client>();
-let live = false;
-let title = "";
+let currentStream: ReadableStream<Uint8Array> | null = null;
+let currentTitle = "";
 
-const CORS = {
-  "Access-Control-Allow-Origin": "*",
-  "Access-Control-Allow-Headers": "*",
-  "Access-Control-Allow-Methods": "*",
-};
+serve(async (req) => {
+  const url = new URL(req.url);
+  if (url.pathname === "/upload" && req.method === "POST") {
+    const form = await req.formData();
+    const file = form.get("file") as File;
+    currentTitle = file.name;
+    const reader = file.stream().getReader();
+    const { readable, writable } = new TransformStream();
+    const writer = writable.getWriter();
 
-serve((req) => {
-  if (req.method === "OPTIONS") return new Response(null, { headers: CORS });
+    // background copy
+    (async () => {
+      while (true) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        await writer.write(value);
+        await new Promise(r => setTimeout(r, 20)); // throttle ≈ 40 kbps
+      }
+      writer.close();
+    })();
 
-  if (req.headers.get("upgrade") !== "websocket") {
-    return new Response(JSON.stringify({ live, title }), {
-      headers: { "Content-Type": "application/json", ...CORS },
+    currentStream = readable;
+    return new Response(JSON.stringify({ ok: true }), {
+      headers: { "Access-Control-Allow-Origin": "*" },
     });
   }
 
-  const { socket, response } = Deno.upgradeWebSocket(req);
-  const id = crypto.randomUUID();
-  const client: Client = { id, ws: socket };
-  clients.set(id, client);
-
-  socket.onmessage = async (e) => {
-    if (typeof e.data === "string") {
-      const msg = JSON.parse(e.data);
-
-      if (msg.type === "register") {
-        client.role = msg.role;
-        if (msg.role === "broadcaster") {
-          live = true;
-          title = msg.title || "Live Stream";
-          // सभी listeners को नया title भेजो
-          broadcast({ type: "title", title });
-          console.log("🎙️ Broadcaster:", title);
-        } else {
-          // listener connected -> status भेजो
-          socket.send(JSON.stringify({ type: "title", title, live }));
-        }
-      }
-
-      if (msg.type === "title") {
-        title = msg.title;
-        broadcast({ type: "title", title });
-      }
-    } else {
-      // audio chunk (binary)
-      if (client.role === "broadcaster") {
-        broadcast(e.data, "listener");
-      }
-    }
-  };
-
-  socket.onclose = () => {
-    clients.delete(id);
-    if (client.role === "broadcaster") {
-      live = false;
-      title = "";
-      broadcast({ type: "offline" });
-      console.log("🛑 Broadcaster left");
-    }
-  };
-
-  return response;
-});
-
-function broadcast(data: any, to?: "listener" | "broadcaster") {
-  for (const c of clients.values()) {
-    if (!to || c.role === to) {
-      try {
-        if (data instanceof Uint8Array) c.ws.send(data);
-        else c.ws.send(JSON.stringify(data));
-      } catch {}
-    }
+  if (url.pathname === "/stream") {
+    if (!currentStream)
+      return new Response("No live", { status: 404 });
+    return new Response(currentStream, {
+      headers: {
+        "Access-Control-Allow-Origin": "*",
+        "Content-Type": "audio/mpeg",
+      },
+    });
   }
-}
+
+  if (url.pathname === "/status")
+    return new Response(
+      JSON.stringify({ live: !!currentStream, title: currentTitle }),
+      { headers: { "Access-Control-Allow-Origin": "*" } },
+    );
+
+  return new Response("OK");
+}, { port: 8000 });
