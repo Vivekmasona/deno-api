@@ -1,10 +1,11 @@
-// === FM Stream Server (multi file ready) ===
-// Deploy on Deno Deploy: https://vfy-call.deno.dev
+// === Real-time FM Stream Server (30kbps bitrate + status) ===
+// Deploy: https://vfy-call.deno.dev
 
 import { serve } from "https://deno.land/std@0.224.0/http/server.ts";
 
 let listeners: ((chunk: Uint8Array) => void)[] = [];
 let isStreaming = false;
+let currentTitle = "";
 
 const cors = {
   "Access-Control-Allow-Origin": "*",
@@ -12,21 +13,22 @@ const cors = {
   "Access-Control-Allow-Headers": "*",
 };
 
-console.log("🎧 FM Stream Server online...");
+console.log("🎧 VFY FM Stream Server running...");
 
 serve(async (req) => {
   const url = new URL(req.url);
 
-  if (req.method === "OPTIONS")
-    return new Response(null, { headers: cors });
+  if (req.method === "OPTIONS") return new Response(null, { headers: cors });
 
-  // === Broadcaster upload stream ===
+  // === Upload endpoint ===
   if (url.pathname === "/upload" && req.method === "POST") {
-    if (!req.body) return new Response("No body", { status: 400, headers: cors });
+    const title = url.searchParams.get("title") || "Unknown Song";
+    currentTitle = title;
     isStreaming = true;
-    console.log("🎙️ Live stream started...");
+    console.log(`🎙️ Now streaming: ${title}`);
 
-    const reader = req.body.getReader();
+    const reader = req.body?.getReader();
+    if (!reader) return new Response("No stream", { status: 400, headers: cors });
 
     (async () => {
       try {
@@ -34,13 +36,15 @@ serve(async (req) => {
           const { done, value } = await reader.read();
           if (done) break;
           if (value) for (const fn of listeners) fn(value);
+          await new Promise(r => setTimeout(r, 33)); // throttle ~30kbps
         }
       } catch (err) {
-        console.error("Stream error:", err);
+        console.error("Stream error", err);
       } finally {
         isStreaming = false;
         listeners = [];
-        console.log("🛑 Stream ended");
+        currentTitle = "";
+        console.log("🛑 Stream stopped");
       }
     })();
 
@@ -49,17 +53,17 @@ serve(async (req) => {
 
   // === Listener endpoint ===
   if (url.pathname === "/listen" && req.method === "GET") {
-    const body = new ReadableStream({
+    const stream = new ReadableStream({
       start(controller) {
         const send = (chunk: Uint8Array) => controller.enqueue(chunk);
         listeners.push(send);
       },
       cancel() {
-        listeners = listeners.filter((fn) => fn !== controller.enqueue);
-      },
+        listeners = listeners.filter(fn => fn !== controller.enqueue);
+      }
     });
 
-    const headers = {
+    const resHeaders = {
       ...cors,
       "Content-Type": "audio/mpeg",
       "Cache-Control": "no-cache",
@@ -67,9 +71,19 @@ serve(async (req) => {
       "Transfer-Encoding": "chunked",
     };
 
-    console.log("🎧 Listener joined");
-    return new Response(body, { headers });
+    console.log("🎧 Listener connected");
+    return new Response(stream, { headers: resHeaders });
   }
 
-  return new Response("FM Stream Server Active", { headers: cors });
+  // === Status endpoint ===
+  if (url.pathname === "/status" && req.method === "GET") {
+    return new Response(JSON.stringify({
+      live: isStreaming,
+      title: currentTitle,
+    }), {
+      headers: { ...cors, "Content-Type": "application/json" }
+    });
+  }
+
+  return new Response("FM Server Active", { headers: cors });
 });
