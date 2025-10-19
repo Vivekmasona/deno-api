@@ -1,79 +1,71 @@
-// === Deno Binary Audio Broadcast Server (Stable) ===
-// Run: deno run --allow-net main.ts
-// URL: https://vfy-call.deno.dev
+// === Deno FM CDN Stream API ===
+// Deploy at: https://vfy-call.deno.dev
+// Handles small audio chunks (binary) from broadcaster and updates playlist for CDN use
 
 import { serve } from "https://deno.land/std@0.224.0/http/server.ts";
 
-let broadcaster: WebSocket | null = null;
-const listeners = new Set<WebSocket>();
+interface Segment {
+  name: string;
+  data: Uint8Array;
+}
 
-console.log("🎧 Binary Audio Server running...");
+let segments: Segment[] = [];
+const MAX_SEGMENTS = 10; // keep last 10 (~10s if 1s each)
 
-// Handle requests
+function m3u8() {
+  const lines = [
+    "#EXTM3U",
+    "#EXT-X-VERSION:3",
+    "#EXT-X-TARGETDURATION:1",
+    `#EXT-X-MEDIA-SEQUENCE:${Math.max(0, segments.length - MAX_SEGMENTS)}`
+  ];
+  for (const seg of segments.slice(-MAX_SEGMENTS)) {
+    lines.push("#EXTINF:1.0,");
+    lines.push(`${seg.name}`);
+  }
+  return lines.join("\n");
+}
+
 serve(async (req) => {
-  const { searchParams } = new URL(req.url);
-  const role = searchParams.get("role");
+  const url = new URL(req.url);
+  const path = url.pathname;
 
-  // Preflight (CORS)
-  if (req.method === "OPTIONS") {
-    return new Response("ok", {
-      headers: {
-        "Access-Control-Allow-Origin": "*",
-        "Access-Control-Allow-Headers": "*",
-        "Access-Control-Allow-Methods": "GET, POST, OPTIONS",
-      },
+  // --- CORS ---
+  const headers = {
+    "Access-Control-Allow-Origin": "*",
+    "Access-Control-Allow-Methods": "GET, POST, OPTIONS",
+    "Access-Control-Allow-Headers": "*",
+  };
+  if (req.method === "OPTIONS") return new Response("ok", { headers });
+
+  // === Playlist request ===
+  if (path === "/live/playlist.m3u8") {
+    return new Response(m3u8(), {
+      headers: { ...headers, "Content-Type": "application/vnd.apple.mpegurl" },
     });
   }
 
-  // WebSocket upgrade
-  if (req.headers.get("upgrade") === "websocket") {
-    const { socket, response } = Deno.upgradeWebSocket(req);
-    console.log(`🔌 WS connected: ${role}`);
-
-    socket.binaryType = "arraybuffer";
-
-    socket.onopen = () => {
-      if (role === "broadcaster") {
-        broadcaster = socket;
-        console.log("📡 Broadcaster connected");
-      } else {
-        listeners.add(socket);
-        console.log(`👂 Listener joined (${listeners.size})`);
-      }
-    };
-
-    socket.onmessage = (event) => {
-      // Relay binary data directly from broadcaster → all listeners
-      if (role === "broadcaster") {
-        if (event.data instanceof ArrayBuffer) {
-          for (const client of listeners) {
-            try {
-              client.send(event.data);
-            } catch (err) {
-              console.error("Send error:", err);
-            }
-          }
-        } else if (typeof event.data === "string") {
-          // ignore textual data for now
-        }
-      }
-    };
-
-    socket.onclose = () => {
-      console.log("❌ WS closed:", role);
-      if (role === "broadcaster") broadcaster = null;
-      else listeners.delete(socket);
-    };
-
-    socket.onerror = (err) => console.error("⚠️ Socket error:", err);
-
-    return response;
+  // === Segment GET ===
+  if (path.startsWith("/live/")) {
+    const name = path.replace("/live/", "");
+    const seg = segments.find((s) => s.name === name);
+    if (seg) {
+      return new Response(seg.data, {
+        headers: { ...headers, "Content-Type": "audio/aac" },
+      });
+    } else {
+      return new Response("Not Found", { status: 404, headers });
+    }
   }
 
-  // Default HTTP response
-  return new Response("🎧 Deno FM server active", {
-    headers: {
-      "Access-Control-Allow-Origin": "*",
-    },
-  });
+  // === Segment upload (broadcaster) ===
+  if (path === "/upload" && req.method === "POST") {
+    const data = new Uint8Array(await req.arrayBuffer());
+    const name = `seg_${Date.now()}.aac`;
+    segments.push({ name, data });
+    if (segments.length > MAX_SEGMENTS) segments.shift();
+    return new Response("ok", { headers });
+  }
+
+  return new Response("🎧 Deno FM Stream API active", { headers });
 });
