@@ -1,4 +1,3 @@
-// server.ts
 import { serve } from "https://deno.land/std@0.224.0/http/server.ts";
 
 interface Client {
@@ -9,7 +8,7 @@ interface Client {
 
 const clients = new Map<string, Client>();
 
-console.log("🎧 Bot Server ready");
+console.log("🎧 Deno FM Signaling Server running on :8000");
 
 serve((req) => {
   if (req.headers.get("upgrade") !== "websocket") {
@@ -34,21 +33,30 @@ serve((req) => {
     }
 
     if (msg.type === "offer") {
+      // Broadcast offer to all listeners
       for (const x of clients.values())
-        if (x.role === "listener") x.ws.send(JSON.stringify(msg));
+        if (x.role === "listener")
+          x.ws.send(JSON.stringify({ ...msg, from: id }));
     }
 
     if (msg.type === "answer") {
+      // Send back to broadcaster
       for (const x of clients.values())
-        if (x.role === "broadcaster") x.ws.send(JSON.stringify(msg));
+        if (x.role === "broadcaster")
+          x.ws.send(JSON.stringify({ ...msg, from: id }));
     }
 
     if (msg.type === "candidate") {
+      // Relay candidates to all except sender
       for (const x of clients.values())
-        if (x !== c) x.ws.send(JSON.stringify(msg));
+        if (x.id !== id) x.ws.send(JSON.stringify(msg));
     }
   };
 
-  socket.onclose = () => clients.delete(id);
+  socket.onclose = () => {
+    clients.delete(id);
+    console.log(`❌ Client left: ${id}`);
+  };
+
   return response;
 }, { port: 8000 });
