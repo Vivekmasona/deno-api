@@ -1,4 +1,4 @@
-// === WebRTC Signaling Server with full CORS ===
+// === Live Radio Signalling Server (Deno) ===
 // Run: deno run --allow-net main.ts
 
 import { serve } from "https://deno.land/std@0.224.0/http/server.ts";
@@ -9,7 +9,7 @@ interface Session {
 }
 const sessions = new Map<string, Session>();
 
-console.log("✅ WebRTC Signaling Server running on :8000");
+console.log("✅ Live Radio Signalling Server running on :8000");
 
 serve(async (req) => {
   const url = new URL(req.url);
@@ -25,7 +25,6 @@ serve(async (req) => {
     });
   }
 
-  // --- Get session id
   const id = url.searchParams.get("id");
   if (!id) {
     return new Response("Missing id", {
@@ -34,7 +33,7 @@ serve(async (req) => {
     });
   }
 
-  // --- GET: read offer/answer
+  // --- GET: fetch session
   if (req.method === "GET") {
     const s = sessions.get(id);
     return new Response(JSON.stringify(s || {}), {
@@ -45,7 +44,7 @@ serve(async (req) => {
     });
   }
 
-  // --- POST: update offer/answer
+  // --- POST: update session
   if (req.method === "POST") {
     const data = await req.json();
     let s = sessions.get(id);
@@ -59,6 +58,7 @@ serve(async (req) => {
     });
   }
 
+  // --- Fallback
   return new Response("Not found", {
     status: 404,
     headers: { "Access-Control-Allow-Origin": "*" },
