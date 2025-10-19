@@ -1,44 +1,35 @@
-// stream_server.ts
+// fm_stream.ts
 import { serve } from "https://deno.land/std@0.224.0/http/server.ts";
 
+let globalController: ReadableStreamDefaultController<Uint8Array> | null = null;
 let currentStream: ReadableStream<Uint8Array> | null = null;
 
-console.log("🎧 Deno FM Live Stream Server running...");
+console.log("🎧 Live FM server started on port 8000");
 
-// Helper: CORS headers
-function corsHeaders(extra: Record<string, string> = {}) {
-  return {
-    "Access-Control-Allow-Origin": "*",
-    "Access-Control-Allow-Methods": "GET, POST, OPTIONS",
-    "Access-Control-Allow-Headers": "Content-Type, Range, Origin, Accept",
-    ...extra,
-  };
-}
+// Helper: universal CORS headers
+const cors = {
+  "Access-Control-Allow-Origin": "*",
+  "Access-Control-Allow-Methods": "GET, POST, OPTIONS",
+  "Access-Control-Allow-Headers": "*",
+};
 
 serve(async (req) => {
   const url = new URL(req.url);
 
-  // Preflight CORS check
-  if (req.method === "OPTIONS") {
-    return new Response(null, { headers: corsHeaders() });
-  }
+  // handle preflight
+  if (req.method === "OPTIONS") return new Response(null, { headers: cors });
 
-  // Broadcaster upload
-  if (req.method === "POST" && url.pathname === "/upload") {
-    const body = req.body;
-    if (!body)
-      return new Response("Missing body", {
-        status: 400,
-        headers: corsHeaders(),
-      });
-
-    console.log("🎙️ Broadcaster connected, streaming started...");
-
-    const { readable, writable } = new TransformStream();
+  // POST /upload  (broadcaster)
+  if (url.pathname === "/upload" && req.method === "POST") {
+    const { readable, writable } = new TransformStream<Uint8Array, Uint8Array>();
     currentStream = readable;
-
     const writer = writable.getWriter();
-    const reader = body.getReader();
+    const reader = req.body?.getReader();
+
+    console.log("🎙️ Stream upload started...");
+
+    if (!reader)
+      return new Response("No stream body", { status: 400, headers: cors });
 
     (async () => {
       try {
@@ -47,8 +38,8 @@ serve(async (req) => {
           if (done) break;
           writer.write(value);
         }
-      } catch (err) {
-        console.error("Stream error:", err);
+      } catch (e) {
+        console.error("stream error:", e);
       } finally {
         writer.close();
         currentStream = null;
@@ -56,32 +47,26 @@ serve(async (req) => {
       }
     })();
 
-    return new Response("OK", { headers: corsHeaders() });
+    return new Response("OK", { headers: cors });
   }
 
-  // Listener stream
-  if (req.method === "GET" && url.pathname === "/listen") {
+  // GET /listen (listener)
+  if (url.pathname === "/listen" && req.method === "GET") {
     if (!currentStream) {
-      return new Response("No live stream", {
-        status: 404,
-        headers: corsHeaders(),
-      });
+      return new Response("No live stream", { status: 404, headers: cors });
     }
 
-    console.log("🎧 Listener joined stream");
-
-    const headers = corsHeaders({
+    const headers = {
+      ...cors,
       "Content-Type": "audio/mpeg",
       "Cache-Control": "no-cache",
       "Connection": "keep-alive",
       "Transfer-Encoding": "chunked",
-    });
+    };
 
-    return new Response(currentStream, { headers });
+    console.log("🎧 Listener connected.");
+    return new Response(currentStream.pipeThrough(new TransformStream()), { headers });
   }
 
-  // Default response
-  return new Response("✅ FM Streaming Server Active", {
-    headers: corsHeaders(),
-  });
-});
+  return new Response("FM Server active", { headers: cors });
+}, { port: 8000 });
