@@ -1,101 +1,82 @@
-// main.ts
+// === Deno WebRTC Signaling Server (with CORS) ===
+// Simple broadcast signaling via WebSocket
+
 import { serve } from "https://deno.land/std@0.224.0/http/server.ts";
 
-interface Conn { id: string; ws: WebSocket; role?: 'broadcaster'|'listener'; }
+const listeners = new Map<string, WebSocket>(); // id -> ws
+let broadcaster: WebSocket | null = null;
 
-const conns = new Map<string, Conn>();
-
-console.log("✅ Signaling WebSocket server running on :8000");
+console.log("🎧 Deno FM Signaling running on :8080");
 
 serve((req) => {
-  // CORS preflight for any HTTP
+  // ✅ Handle CORS preflight requests
   if (req.method === "OPTIONS") {
     return new Response("ok", {
+      status: 200,
       headers: {
         "Access-Control-Allow-Origin": "*",
         "Access-Control-Allow-Methods": "GET, POST, OPTIONS",
-        "Access-Control-Allow-Headers": "*",
+        "Access-Control-Allow-Headers": "Content-Type",
       },
     });
   }
 
-  // If not WebSocket upgrade, simple info (includes CORS)
-  if (req.headers.get("upgrade")?.toLowerCase() !== "websocket") {
-    return new Response("WebSocket signaling server", {
-      headers: { "Access-Control-Allow-Origin": "*" },
+  // ✅ Normal WebSocket upgrade
+  const { searchParams } = new URL(req.url);
+  const role = searchParams.get("role") || "listener";
+
+  // Only upgrade for WebSocket
+  if (req.headers.get("upgrade") !== "websocket") {
+    return new Response("This endpoint only supports WebSocket", {
+      status: 400,
+      headers: {
+        "Access-Control-Allow-Origin": "*",
+      },
     });
   }
 
   const { socket, response } = Deno.upgradeWebSocket(req);
-  const id = crypto.randomUUID();
-  const conn: Conn = { id, ws: socket };
-  conns.set(id, conn);
-  console.log("conn open", id);
+
+  socket.onopen = () => {
+    if (role === "broadcaster") {
+      broadcaster = socket;
+      console.log("📡 Broadcaster connected");
+    } else {
+      const id = crypto.randomUUID();
+      listeners.set(id, socket);
+      console.log("👂 Listener joined:", id);
+    }
+  };
 
   socket.onmessage = (e) => {
-    // Expect JSON messages
-    try {
-      // sometimes messages may be binary (ArrayBuffer) — ignore here
-      if (typeof e.data !== "string") return;
-      const msg = JSON.parse(e.data);
-      // Register role
-      if (msg.type === "register") {
-        conn.role = msg.role; // 'broadcaster' or 'listener'
-        console.log(`registered ${id} as ${conn.role}`);
-        // If new listener and a broadcaster exists, notify broadcasters
-        if (conn.role === "listener") {
-          for (const c of conns.values()) {
-            if (c.role === "broadcaster") {
-              c.ws.send(JSON.stringify({ type: "listener-joined", id }));
-            }
-          }
-        }
-        return;
-      }
+    const data = JSON.parse(e.data);
 
-      // Forward messages: include target id when appropriate
-      // messages: offer -> target listener, answer -> target broadcaster, candidate -> target
-      const { type, target, payload } = msg;
-
-      if (type === "offer") {
-        // forward offer to target listener
-        const t = conns.get(target);
-        if (t) t.ws.send(JSON.stringify({ type: "offer", from: id, payload }));
-        return;
+    if (role === "broadcaster") {
+      // send offer to all listeners
+      for (const ws of listeners.values()) {
+        try {
+          ws.send(JSON.stringify({ type: "offer", sdp: data.sdp }));
+        } catch (_) {}
       }
-      if (type === "answer") {
-        // forward answer to target broadcaster
-        const t = conns.get(target);
-        if (t) t.ws.send(JSON.stringify({ type: "answer", from: id, payload }));
-        return;
-      }
-      if (type === "candidate") {
-        // forward candidate to target
-        const t = conns.get(target);
-        if (t) t.ws.send(JSON.stringify({ type: "candidate", from: id, payload }));
-        return;
-      }
-
-      // control messages broadcasting to broadcaster(s)
-      if (type === "broadcast-control") {
-        for (const c of conns.values()) if (c.role === "listener") c.ws.send(JSON.stringify({ type: "control", payload }));
-        return;
-      }
-    } catch (err) {
-      console.error("msg parse error", err);
+    } else if (role === "listener") {
+      // send answer back to broadcaster
+      try {
+        broadcaster?.send(JSON.stringify({ type: "answer", sdp: data.sdp }));
+      } catch (_) {}
     }
   };
 
   socket.onclose = () => {
-    conns.delete(id);
-    console.log("conn close", id);
-    // If a listener left, notify broadcasters of disconnect (optional)
-    for (const c of conns.values()) {
-      if (c.role === "broadcaster") {
-        c.ws.send(JSON.stringify({ type: "peer-left", id }));
+    if (role === "broadcaster") {
+      broadcaster = null;
+      console.log("❌ Broadcaster disconnected");
+    } else {
+      for (const [id, ws] of listeners.entries()) {
+        if (ws === socket) listeners.delete(id);
       }
+      console.log("👋 Listener left");
     }
   };
 
   return response;
-}, { port: 8000 });
+}, { port: 8080 });
