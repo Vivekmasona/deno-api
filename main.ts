@@ -1,13 +1,20 @@
-// main.ts
+// server.ts
 import { serve } from "https://deno.land/std@0.224.0/http/server.ts";
 
-interface Conn { id: string; ws: WebSocket; role?: 'broadcaster'|'listener'; }
-const conns = new Map<string, Conn>();
-let lastOffer: any = null; // 🆕 store latest broadcaster offer
+interface Client {
+  id: string;
+  ws: WebSocket;
+  role?: "broadcaster" | "listener";
+}
 
-console.log("🚀 FastConnect FM server on :8000");
+const clients = new Map<string, Client>();
+let lastOffer: any = null;
+let broadcasterId: string | null = null;
+
+console.log("🎧 FM signaling server live...");
 
 serve((req) => {
+  // ---- CORS ----
   if (req.method === "OPTIONS") {
     return new Response("ok", {
       headers: {
@@ -19,56 +26,78 @@ serve((req) => {
   }
 
   if (req.headers.get("upgrade")?.toLowerCase() !== "websocket") {
-    return new Response("FM WebRTC signaling server", {
+    return new Response("FM Signaling Online ok", {
       headers: { "Access-Control-Allow-Origin": "*" },
     });
   }
 
   const { socket, response } = Deno.upgradeWebSocket(req);
   const id = crypto.randomUUID();
-  const conn: Conn = { id, ws: socket };
-  conns.set(id, conn);
+  const c: Client = { id, ws: socket };
+  clients.set(id, c);
 
   socket.onmessage = (e) => {
     if (typeof e.data !== "string") return;
     const msg = JSON.parse(e.data);
 
+    // --- registration ---
     if (msg.type === "register") {
-      conn.role = msg.role;
-      if (conn.role === "listener") {
-        console.log("👂 new listener", id);
-        // 🟢 send latest offer instantly if available
-        if (lastOffer) {
-          conn.ws.send(JSON.stringify({ type: "offer", from: lastOffer.from, payload: lastOffer.payload }));
-        }
+      c.role = msg.role;
+      console.log("🔗", c.role, "connected:", id);
+
+      // if listener joins and we already have an offer
+      if (c.role === "listener" && lastOffer) {
+        c.ws.send(JSON.stringify({ type: "offer", from: broadcasterId, payload: lastOffer }));
       }
       return;
     }
 
-    // 🛰️ save latest offer
+    // --- broadcaster sends offer ---
     if (msg.type === "offer") {
-      lastOffer = { from: id, payload: msg.payload };
-      // broadcast offer to all listeners instantly
-      for (const c of conns.values()) {
-        if (c.role === "listener") {
-          c.ws.send(JSON.stringify({ type: "offer", from: id, payload: msg.payload }));
+      broadcasterId = id;
+      lastOffer = msg.payload;
+      console.log("📡 offer saved from broadcaster");
+
+      // send offer to all listeners
+      for (const x of clients.values()) {
+        if (x.role === "listener") {
+          x.ws.send(JSON.stringify({ type: "offer", from: id, payload: msg.payload }));
         }
       }
       return;
     }
 
+    // --- listener sends answer ---
     if (msg.type === "answer") {
-      const t = conns.get(msg.target);
-      if (t) t.ws.send(JSON.stringify({ type: "answer", from: id, payload: msg.payload }));
+      const target = clients.get(broadcasterId!);
+      if (target) target.ws.send(JSON.stringify({ type: "answer", from: id, payload: msg.payload }));
       return;
     }
 
+    // --- ICE candidate ---
     if (msg.type === "candidate") {
-      const t = conns.get(msg.target);
-      if (t) t.ws.send(JSON.stringify({ type: "candidate", from: id, payload: msg.payload }));
+      if (msg.target) {
+        const t = clients.get(msg.target);
+        if (t) t.ws.send(JSON.stringify({ type: "candidate", from: id, payload: msg.payload }));
+      } else {
+        // broadcast to opposite role
+        for (const x of clients.values()) {
+          if (x !== c && x.role !== c.role) {
+            x.ws.send(JSON.stringify({ type: "candidate", from: id, payload: msg.payload }));
+          }
+        }
+      }
     }
   };
 
-  socket.onclose = () => conns.delete(id);
+  socket.onclose = () => {
+    clients.delete(id);
+    if (id === broadcasterId) {
+      broadcasterId = null;
+      lastOffer = null;
+      console.log("❌ Broadcaster left, cleared offer");
+    }
+  };
+
   return response;
 }, { port: 8000 });
