@@ -8,13 +8,13 @@ interface Client {
 }
 
 const clients = new Map<string, Client>();
-let lastOffer: any = null;
 let broadcasterId: string | null = null;
+let lastOffer: any = null;
 
-console.log("🎧 FM signaling server live...");
+console.log("🎧 FM Signaling Server Running...");
 
 serve((req) => {
-  // ---- CORS ----
+  // Allow CORS
   if (req.method === "OPTIONS") {
     return new Response("ok", {
       headers: {
@@ -25,65 +25,67 @@ serve((req) => {
     });
   }
 
+  // WebSocket upgrade
   if (req.headers.get("upgrade")?.toLowerCase() !== "websocket") {
-    return new Response("FM Signaling Online ok", {
+    return new Response("FM server active", {
       headers: { "Access-Control-Allow-Origin": "*" },
     });
   }
 
   const { socket, response } = Deno.upgradeWebSocket(req);
   const id = crypto.randomUUID();
-  const c: Client = { id, ws: socket };
-  clients.set(id, c);
+  const conn: Client = { id, ws: socket };
+  clients.set(id, conn);
 
   socket.onmessage = (e) => {
     if (typeof e.data !== "string") return;
     const msg = JSON.parse(e.data);
 
-    // --- registration ---
+    // registration
     if (msg.type === "register") {
-      c.role = msg.role;
-      console.log("🔗", c.role, "connected:", id);
+      conn.role = msg.role;
+      console.log(`🧩 ${id} registered as ${msg.role}`);
 
-      // if listener joins and we already have an offer
-      if (c.role === "listener" && lastOffer) {
-        c.ws.send(JSON.stringify({ type: "offer", from: broadcasterId, payload: lastOffer }));
+      // instantly send offer if broadcaster already live
+      if (msg.role === "listener" && lastOffer && broadcasterId) {
+        conn.ws.send(JSON.stringify({
+          type: "offer",
+          from: broadcasterId,
+          payload: lastOffer
+        }));
       }
       return;
     }
 
-    // --- broadcaster sends offer ---
+    // broadcaster offer
     if (msg.type === "offer") {
       broadcasterId = id;
       lastOffer = msg.payload;
-      console.log("📡 offer saved from broadcaster");
-
-      // send offer to all listeners
-      for (const x of clients.values()) {
-        if (x.role === "listener") {
-          x.ws.send(JSON.stringify({ type: "offer", from: id, payload: msg.payload }));
+      console.log("📡 Offer received from broadcaster, sending to all listeners...");
+      for (const c of clients.values()) {
+        if (c.role === "listener") {
+          c.ws.send(JSON.stringify({ type: "offer", from: id, payload: msg.payload }));
         }
       }
       return;
     }
 
-    // --- listener sends answer ---
+    // listener answer
     if (msg.type === "answer") {
-      const target = clients.get(broadcasterId!);
-      if (target) target.ws.send(JSON.stringify({ type: "answer", from: id, payload: msg.payload }));
+      const b = clients.get(broadcasterId!);
+      if (b) b.ws.send(JSON.stringify({ type: "answer", from: id, payload: msg.payload }));
       return;
     }
 
-    // --- ICE candidate ---
+    // ICE candidate exchange
     if (msg.type === "candidate") {
       if (msg.target) {
         const t = clients.get(msg.target);
         if (t) t.ws.send(JSON.stringify({ type: "candidate", from: id, payload: msg.payload }));
       } else {
-        // broadcast to opposite role
-        for (const x of clients.values()) {
-          if (x !== c && x.role !== c.role) {
-            x.ws.send(JSON.stringify({ type: "candidate", from: id, payload: msg.payload }));
+        for (const c of clients.values()) {
+          if (c !== conn && c.role !== conn.role) {
+            c.ws.send(JSON.stringify({ type: "candidate", from: id, payload: msg.payload }));
           }
         }
       }
@@ -95,7 +97,7 @@ serve((req) => {
     if (id === broadcasterId) {
       broadcasterId = null;
       lastOffer = null;
-      console.log("❌ Broadcaster left, cleared offer");
+      console.log("❌ Broadcaster disconnected, cleared offer");
     }
   };
 
