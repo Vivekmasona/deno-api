@@ -1,4 +1,6 @@
-// server.ts
+// === FM Relay Server ===
+// Run: deno run --allow-net server.ts
+
 import { serve } from "https://deno.land/std@0.224.0/http/server.ts";
 
 interface Client {
@@ -8,16 +10,15 @@ interface Client {
 }
 
 const clients = new Map<string, Client>();
-console.log("🎧 FM WebRTC Server ready...");
+let currentOffer: any = null; // Store broadcaster offer
+let iceCandidates: any[] = []; // Relay ICE candidates
+
+console.log("🎧 FM Multi-Listener Server Running...");
 
 serve((req) => {
   if (req.headers.get("upgrade") !== "websocket") {
     return new Response("FM relay active", {
-      headers: {
-        "Access-Control-Allow-Origin": "*",
-        "Access-Control-Allow-Methods": "GET, POST, OPTIONS",
-        "Access-Control-Allow-Headers": "*",
-      },
+      headers: { "Access-Control-Allow-Origin": "*" },
     });
   }
 
@@ -30,35 +31,54 @@ serve((req) => {
     if (typeof e.data !== "string") return;
     const msg = JSON.parse(e.data);
 
-    switch (msg.type) {
-      case "register":
-        c.role = msg.role;
-        console.log(`👤 ${c.role} connected (${id})`);
-        break;
+    if (msg.type === "register") {
+      c.role = msg.role;
+      console.log(`🧩 ${c.role} joined: ${id}`);
 
-      case "offer":
-        for (const x of clients.values())
-          if (x.role === "listener") x.ws.send(JSON.stringify(msg));
-        break;
+      // New listener gets current offer if broadcaster live
+      if (c.role === "listener" && currentOffer) {
+        c.ws.send(JSON.stringify({ type: "offer", payload: currentOffer }));
+        iceCandidates.forEach(ic =>
+          c.ws.send(JSON.stringify({ type: "candidate", payload: ic }))
+        );
+      }
+      return;
+    }
 
-      case "answer":
-        for (const x of clients.values())
-          if (x.role === "broadcaster") x.ws.send(JSON.stringify(msg));
-        break;
+    if (msg.type === "offer" && c.role === "broadcaster") {
+      currentOffer = msg.payload;
+      console.log("📡 Broadcaster Live");
+      // Send offer to all listeners
+      for (const x of clients.values())
+        if (x.role === "listener")
+          x.ws.send(JSON.stringify(msg));
+    }
 
-      case "candidate":
-        for (const x of clients.values())
-          if (x !== c) x.ws.send(JSON.stringify(msg));
-        break;
+    if (msg.type === "answer" && c.role === "listener") {
+      // Send answer back to broadcaster only
+      for (const x of clients.values())
+        if (x.role === "broadcaster")
+          x.ws.send(JSON.stringify(msg));
+    }
+
+    if (msg.type === "candidate") {
+      // Save ICE candidates for replay
+      iceCandidates.push(msg.payload);
+      for (const x of clients.values())
+        if (x !== c)
+          x.ws.send(JSON.stringify(msg));
     }
   };
 
   socket.onclose = () => {
     clients.delete(id);
     if (c.role === "broadcaster") {
+      currentOffer = null;
+      iceCandidates = [];
       for (const x of clients.values())
         if (x.role === "listener")
           x.ws.send(JSON.stringify({ type: "offline" }));
+      console.log("❌ Broadcaster disconnected");
     }
   };
 
