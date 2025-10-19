@@ -1,5 +1,4 @@
-// === VFY Live Audio Stream Server ===
-// deploy on https://vfy-call.deno.dev
+// === VFY Auto-Live FM Server ===
 import { serve } from "https://deno.land/std@0.224.0/http/server.ts";
 
 interface Client {
@@ -13,18 +12,16 @@ let title = "";
 
 const CORS = {
   "Access-Control-Allow-Origin": "*",
-  "Access-Control-Allow-Methods": "GET,POST,OPTIONS",
   "Access-Control-Allow-Headers": "*",
+  "Access-Control-Allow-Methods": "*",
 };
 
 serve((req) => {
-  if (req.method === "OPTIONS")
-    return new Response(null, { headers: CORS });
+  if (req.method === "OPTIONS") return new Response(null, { headers: CORS });
 
-  // For health check
   if (req.headers.get("upgrade") !== "websocket") {
     return new Response(JSON.stringify({ live, title }), {
-      headers: { "content-type": "application/json", ...CORS },
+      headers: { "Content-Type": "application/json", ...CORS },
     });
   }
 
@@ -33,25 +30,32 @@ serve((req) => {
   const client: Client = { id, ws: socket };
   clients.set(id, client);
 
-  socket.onmessage = async (ev) => {
-    if (typeof ev.data === "string") {
-      const msg = JSON.parse(ev.data);
+  socket.onmessage = async (e) => {
+    if (typeof e.data === "string") {
+      const msg = JSON.parse(e.data);
+
       if (msg.type === "register") {
         client.role = msg.role;
         if (msg.role === "broadcaster") {
           live = true;
-          title = msg.title || "Untitled";
-          console.log("🎙 Broadcaster started:", title);
+          title = msg.title || "Live Stream";
+          // सभी listeners को नया title भेजो
+          broadcast({ type: "title", title });
+          console.log("🎙️ Broadcaster:", title);
+        } else {
+          // listener connected -> status भेजो
+          socket.send(JSON.stringify({ type: "title", title, live }));
         }
       }
+
+      if (msg.type === "title") {
+        title = msg.title;
+        broadcast({ type: "title", title });
+      }
     } else {
-      // binary chunk
+      // audio chunk (binary)
       if (client.role === "broadcaster") {
-        for (const c of clients.values()) {
-          if (c.role === "listener") {
-            try { c.ws.send(ev.data); } catch {}
-          }
-        }
+        broadcast(e.data, "listener");
       }
     }
   };
@@ -61,12 +65,21 @@ serve((req) => {
     if (client.role === "broadcaster") {
       live = false;
       title = "";
+      broadcast({ type: "offline" });
       console.log("🛑 Broadcaster left");
-      for (const c of clients.values()) {
-        if (c.role === "listener") c.ws.send("END");
-      }
     }
   };
 
   return response;
 });
+
+function broadcast(data: any, to?: "listener" | "broadcaster") {
+  for (const c of clients.values()) {
+    if (!to || c.role === to) {
+      try {
+        if (data instanceof Uint8Array) c.ws.send(data);
+        else c.ws.send(JSON.stringify(data));
+      } catch {}
+    }
+  }
+}
