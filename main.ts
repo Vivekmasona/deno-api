@@ -1,5 +1,5 @@
-// === Deno Audio Sync Relay Server (with API health check) ===
-// Works on Deno Deploy
+// === vfy-call.deno.dev : Audio Sync + Status API ===
+// Created for Vivek 🔥
 
 import { serve } from "https://deno.land/std@0.224.0/http/server.ts";
 
@@ -13,23 +13,22 @@ const clients = new Map<string, Client>();
 serve((req) => {
   const { pathname } = new URL(req.url);
 
-  // --- ✅ API Health Check ---
+  // ✅ Health check endpoint
   if (pathname === "/" || pathname === "/status") {
     return new Response(
       JSON.stringify({
         status: "running ✅",
-        clients: clients.size,
-        uptime: new Date().toISOString(),
+        active_clients: clients.size,
+        message: "vfy-call audio sync server is alive!",
+        time: new Date().toISOString(),
       }),
       {
-        headers: {
-          "content-type": "application/json",
-        },
+        headers: { "content-type": "application/json" },
       },
     );
   }
 
-  // --- 🔗 WebSocket Upgrade ---
+  // 🔗 WebSocket connection for sync
   if (pathname === "/ws") {
     const { socket, response } = Deno.upgradeWebSocket(req);
     const id = crypto.randomUUID();
@@ -47,7 +46,7 @@ serve((req) => {
           clients.get(data.to)!.socket.send(JSON.stringify(data));
         }
       } catch (err) {
-        console.error("Invalid message:", err);
+        console.error("Bad message:", err);
       }
     };
 
@@ -59,6 +58,6 @@ serve((req) => {
     return response;
   }
 
-  // --- ❌ Fallback for invalid paths ---
+  // ❌ Fallback
   return new Response("Not Found", { status: 404 });
 });
