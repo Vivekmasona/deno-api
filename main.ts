@@ -1,80 +1,66 @@
+// server.ts
 import { serve } from "https://deno.land/std@0.224.0/http/server.ts";
 
-let liveStream: TransformStream<Uint8Array> | null = null;
-let writer: WritableStreamDefaultWriter<Uint8Array> | null = null;
-let currentTitle = "";
+interface Client {
+  id: string;
+  ws: WebSocket;
+  role?: "broadcaster" | "listener";
+}
 
-serve(async (req) => {
-  const url = new URL(req.url);
+const clients = new Map<string, Client>();
+console.log("🎧 FM WebRTC Server ready...");
 
-  // === Allow CORS ===
-  if (req.method === "OPTIONS") {
-    return new Response(null, {
+serve((req) => {
+  if (req.headers.get("upgrade") !== "websocket") {
+    return new Response("FM relay active", {
       headers: {
         "Access-Control-Allow-Origin": "*",
-        "Access-Control-Allow-Methods": "GET,POST,OPTIONS",
-        "Access-Control-Allow-Headers": "Content-Type",
+        "Access-Control-Allow-Methods": "GET, POST, OPTIONS",
+        "Access-Control-Allow-Headers": "*",
       },
     });
   }
 
-  // === Upload endpoint (progressive write) ===
-  if (url.pathname === "/upload" && req.method === "POST") {
-    const title = url.searchParams.get("title") ?? "Live Stream";
-    currentTitle = title;
+  const { socket, response } = Deno.upgradeWebSocket(req);
+  const id = crypto.randomUUID();
+  const c: Client = { id, ws: socket };
+  clients.set(id, c);
 
-    liveStream = new TransformStream();
-    writer = liveStream.writable.getWriter();
+  socket.onmessage = (e) => {
+    if (typeof e.data !== "string") return;
+    const msg = JSON.parse(e.data);
 
-    const reader = req.body?.getReader();
-    if (!reader) return new Response("No stream", { status: 400 });
+    switch (msg.type) {
+      case "register":
+        c.role = msg.role;
+        console.log(`👤 ${c.role} connected (${id})`);
+        break;
 
-    // Copy upload to live stream progressively
-    (async () => {
-      while (true) {
-        const { done, value } = await reader.read();
-        if (done) break;
-        await writer.write(value);
-        await new Promise(r => setTimeout(r, 15)); // throttle ~30–40 kbps
-      }
-      await writer.close();
-      liveStream = null;
-      writer = null;
-      currentTitle = "";
-    })();
+      case "offer":
+        for (const x of clients.values())
+          if (x.role === "listener") x.ws.send(JSON.stringify(msg));
+        break;
 
-    return new Response(JSON.stringify({ ok: true }), {
-      headers: { "Access-Control-Allow-Origin": "*" },
-    });
-  }
+      case "answer":
+        for (const x of clients.values())
+          if (x.role === "broadcaster") x.ws.send(JSON.stringify(msg));
+        break;
 
-  // === Live stream output ===
-  if (url.pathname === "/stream") {
-    if (!liveStream)
-      return new Response("No live stream", {
-        status: 404,
-        headers: { "Access-Control-Allow-Origin": "*" },
-      });
-    const { readable } = liveStream;
-    return new Response(readable, {
-      headers: {
-        "Access-Control-Allow-Origin": "*",
-        "Content-Type": "audio/mpeg",
-      },
-    });
-  }
+      case "candidate":
+        for (const x of clients.values())
+          if (x !== c) x.ws.send(JSON.stringify(msg));
+        break;
+    }
+  };
 
-  // === Status ===
-  if (url.pathname === "/status") {
-    return new Response(JSON.stringify({
-      live: !!liveStream,
-      title: currentTitle,
-    }), {
-      headers: { "Access-Control-Allow-Origin": "*" },
-    });
-  }
+  socket.onclose = () => {
+    clients.delete(id);
+    if (c.role === "broadcaster") {
+      for (const x of clients.values())
+        if (x.role === "listener")
+          x.ws.send(JSON.stringify({ type: "offline" }));
+    }
+  };
 
-  return new Response("FM server online", {
-    headers: { "Access-Control-Allow-Origin": "*" },
-  });
+  return response;
 }, { port: 8000 });
