@@ -1,81 +1,65 @@
-// === VFY FM Live Audio Stream Server ===
-// Works on Deno Deploy
+// === WebSocket FM Audio Stream Server ===
+// deno run --allow-net server.ts
 import { serve } from "https://deno.land/std@0.224.0/http/server.ts";
 
+interface Client {
+  id: string;
+  ws: WebSocket;
+  role?: "broadcaster" | "listener";
+}
+
+const clients = new Map<string, Client>();
 let live = false;
 let title = "";
-let listeners: TransformStream<Uint8Array, Uint8Array>[] = [];
 
-const CORS = {
-  "Access-Control-Allow-Origin": "*",
-  "Access-Control-Allow-Methods": "GET,POST,OPTIONS",
-  "Access-Control-Allow-Headers": "*",
-};
+console.log("🎧 FM WebSocket Server Ready");
 
-console.log("🎧 Server Ready");
-
-serve(async (req) => {
-  const url = new URL(req.url);
-
-  // Handle preflight
-  if (req.method === "OPTIONS")
-    return new Response(null, { headers: CORS });
-
-  // === Upload from control ===
-  if (url.pathname === "/upload" && req.method === "POST") {
-    live = true;
-    title = url.searchParams.get("title") || "Untitled";
-    console.log("🎙️ Live started:", title);
-
-    const reader = req.body?.getReader();
-    if (!reader) return new Response("no body", { status: 400, headers: CORS });
-
-    (async () => {
-      try {
-        while (true) {
-          const { done, value } = await reader.read();
-          if (done) break;
-          for (const l of listeners) {
-            const writer = l.writable.getWriter();
-            await writer.write(value);
-            writer.releaseLock();
-          }
-          await new Promise(r => setTimeout(r, 33)); // ~30kbps pacing
-        }
-      } catch (err) {
-        console.error(err);
-      } finally {
-        console.log("🛑 Live ended");
-        live = false;
-        title = "";
-        listeners = [];
-      }
-    })();
-
-    return new Response("Streaming...", { headers: CORS });
-  }
-
-  // === Listen stream ===
-  if (url.pathname === "/listen") {
-    const ts = new TransformStream<Uint8Array, Uint8Array>();
-    listeners.push(ts);
-    console.log("🎧 Listener joined:", listeners.length);
-
-    return new Response(ts.readable, {
-      headers: {
-        ...CORS,
-        "Content-Type": "audio/mpeg",
-        "Cache-Control": "no-cache",
-      },
-    });
-  }
-
-  // === Status ===
-  if (url.pathname === "/status") {
+serve((req) => {
+  if (req.headers.get("upgrade") !== "websocket") {
     return new Response(JSON.stringify({ live, title }), {
-      headers: { ...CORS, "Content-Type": "application/json" },
+      headers: { "Access-Control-Allow-Origin": "*" },
     });
   }
 
-  return new Response("FM server online", { headers: CORS });
-});
+  const { socket, response } = Deno.upgradeWebSocket(req);
+  const id = crypto.randomUUID();
+  const c: Client = { id, ws: socket };
+  clients.set(id, c);
+
+  socket.onmessage = (e) => {
+    if (typeof e.data === "string") {
+      const msg = JSON.parse(e.data);
+      if (msg.type === "register") {
+        c.role = msg.role;
+        if (c.role === "broadcaster") {
+          title = msg.title || "Untitled";
+          live = true;
+        }
+        console.log("📡", c.role, "joined");
+      }
+    } else {
+      // binary chunk (audio)
+      if (c.role === "broadcaster") {
+        for (const x of clients.values()) {
+          if (x.role === "listener") {
+            x.ws.send(e.data);
+          }
+        }
+      }
+    }
+  };
+
+  socket.onclose = () => {
+    clients.delete(id);
+    if (c.role === "broadcaster") {
+      live = false;
+      title = "";
+      console.log("🛑 Broadcaster left");
+      for (const x of clients.values()) {
+        if (x.role === "listener") x.ws.send("END");
+      }
+    }
+  };
+
+  return response;
+}, { port: 8000 });
