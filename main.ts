@@ -1,62 +1,87 @@
+// stream_server.ts
 import { serve } from "https://deno.land/std@0.224.0/http/server.ts";
 
-interface Client {
-  id: string;
-  ws: WebSocket;
-  role?: "broadcaster" | "listener";
+let currentStream: ReadableStream<Uint8Array> | null = null;
+
+console.log("🎧 Deno FM Live Stream Server running...");
+
+// Helper: CORS headers
+function corsHeaders(extra: Record<string, string> = {}) {
+  return {
+    "Access-Control-Allow-Origin": "*",
+    "Access-Control-Allow-Methods": "GET, POST, OPTIONS",
+    "Access-Control-Allow-Headers": "Content-Type, Range, Origin, Accept",
+    ...extra,
+  };
 }
 
-const clients = new Map<string, Client>();
+serve(async (req) => {
+  const url = new URL(req.url);
 
-console.log("🎧 Deno FM Signaling Server running on :8000");
-
-serve((req) => {
-  if (req.headers.get("upgrade") !== "websocket") {
-    return new Response("FM bot online", {
-      headers: { "Access-Control-Allow-Origin": "*" },
-    });
+  // Preflight CORS check
+  if (req.method === "OPTIONS") {
+    return new Response(null, { headers: corsHeaders() });
   }
 
-  const { socket, response } = Deno.upgradeWebSocket(req);
-  const id = crypto.randomUUID();
-  const c: Client = { id, ws: socket };
-  clients.set(id, c);
+  // Broadcaster upload
+  if (req.method === "POST" && url.pathname === "/upload") {
+    const body = req.body;
+    if (!body)
+      return new Response("Missing body", {
+        status: 400,
+        headers: corsHeaders(),
+      });
 
-  socket.onmessage = (e) => {
-    if (typeof e.data !== "string") return;
-    const msg = JSON.parse(e.data);
+    console.log("🎙️ Broadcaster connected, streaming started...");
 
-    if (msg.type === "register") {
-      c.role = msg.role;
-      console.log(`🧩 ${c.role} joined: ${id}`);
-      return;
+    const { readable, writable } = new TransformStream();
+    currentStream = readable;
+
+    const writer = writable.getWriter();
+    const reader = body.getReader();
+
+    (async () => {
+      try {
+        while (true) {
+          const { done, value } = await reader.read();
+          if (done) break;
+          writer.write(value);
+        }
+      } catch (err) {
+        console.error("Stream error:", err);
+      } finally {
+        writer.close();
+        currentStream = null;
+        console.log("🛑 Stream ended.");
+      }
+    })();
+
+    return new Response("OK", { headers: corsHeaders() });
+  }
+
+  // Listener stream
+  if (req.method === "GET" && url.pathname === "/listen") {
+    if (!currentStream) {
+      return new Response("No live stream", {
+        status: 404,
+        headers: corsHeaders(),
+      });
     }
 
-    if (msg.type === "offer") {
-      // Broadcast offer to all listeners
-      for (const x of clients.values())
-        if (x.role === "listener")
-          x.ws.send(JSON.stringify({ ...msg, from: id }));
-    }
+    console.log("🎧 Listener joined stream");
 
-    if (msg.type === "answer") {
-      // Send back to broadcaster
-      for (const x of clients.values())
-        if (x.role === "broadcaster")
-          x.ws.send(JSON.stringify({ ...msg, from: id }));
-    }
+    const headers = corsHeaders({
+      "Content-Type": "audio/mpeg",
+      "Cache-Control": "no-cache",
+      "Connection": "keep-alive",
+      "Transfer-Encoding": "chunked",
+    });
 
-    if (msg.type === "candidate") {
-      // Relay candidates to all except sender
-      for (const x of clients.values())
-        if (x.id !== id) x.ws.send(JSON.stringify(msg));
-    }
-  };
+    return new Response(currentStream, { headers });
+  }
 
-  socket.onclose = () => {
-    clients.delete(id);
-    console.log(`❌ Client left: ${id}`);
-  };
-
-  return response;
-}, { port: 8000 });
+  // Default response
+  return new Response("✅ FM Streaming Server Active", {
+    headers: corsHeaders(),
+  });
+});
