@@ -1,20 +1,14 @@
-// === Live Radio Signalling Server (Deno) ===
-// Run: deno run --allow-net main.ts
-
+// main.ts
 import { serve } from "https://deno.land/std@0.224.0/http/server.ts";
 
-interface Session {
-  offer?: string;
-  answer?: string;
-}
-const sessions = new Map<string, Session>();
+interface Conn { id: string; ws: WebSocket; role?: 'broadcaster'|'listener'; }
 
-console.log("✅ Live Radio Signalling Server running on :8000");
+const conns = new Map<string, Conn>();
 
-serve(async (req) => {
-  const url = new URL(req.url);
+console.log("✅ Signaling WebSocket server running on :8000");
 
-  // --- Handle CORS preflight
+serve((req) => {
+  // CORS preflight for any HTTP
   if (req.method === "OPTIONS") {
     return new Response("ok", {
       headers: {
@@ -25,42 +19,83 @@ serve(async (req) => {
     });
   }
 
-  const id = url.searchParams.get("id");
-  if (!id) {
-    return new Response("Missing id", {
-      status: 400,
+  // If not WebSocket upgrade, simple info (includes CORS)
+  if (req.headers.get("upgrade")?.toLowerCase() !== "websocket") {
+    return new Response("WebSocket signaling server", {
       headers: { "Access-Control-Allow-Origin": "*" },
     });
   }
 
-  // --- GET: fetch session
-  if (req.method === "GET") {
-    const s = sessions.get(id);
-    return new Response(JSON.stringify(s || {}), {
-      headers: {
-        "Access-Control-Allow-Origin": "*",
-        "Content-Type": "application/json",
-      },
-    });
-  }
+  const { socket, response } = Deno.upgradeWebSocket(req);
+  const id = crypto.randomUUID();
+  const conn: Conn = { id, ws: socket };
+  conns.set(id, conn);
+  console.log("conn open", id);
 
-  // --- POST: update session
-  if (req.method === "POST") {
-    const data = await req.json();
-    let s = sessions.get(id);
-    if (!s) s = {};
-    if (data.offer) s.offer = data.offer;
-    if (data.answer) s.answer = data.answer;
-    sessions.set(id, s);
+  socket.onmessage = (e) => {
+    // Expect JSON messages
+    try {
+      // sometimes messages may be binary (ArrayBuffer) — ignore here
+      if (typeof e.data !== "string") return;
+      const msg = JSON.parse(e.data);
+      // Register role
+      if (msg.type === "register") {
+        conn.role = msg.role; // 'broadcaster' or 'listener'
+        console.log(`registered ${id} as ${conn.role}`);
+        // If new listener and a broadcaster exists, notify broadcasters
+        if (conn.role === "listener") {
+          for (const c of conns.values()) {
+            if (c.role === "broadcaster") {
+              c.ws.send(JSON.stringify({ type: "listener-joined", id }));
+            }
+          }
+        }
+        return;
+      }
 
-    return new Response("ok", {
-      headers: { "Access-Control-Allow-Origin": "*" },
-    });
-  }
+      // Forward messages: include target id when appropriate
+      // messages: offer -> target listener, answer -> target broadcaster, candidate -> target
+      const { type, target, payload } = msg;
 
-  // --- Fallback
-  return new Response("Not found", {
-    status: 404,
-    headers: { "Access-Control-Allow-Origin": "*" },
-  });
+      if (type === "offer") {
+        // forward offer to target listener
+        const t = conns.get(target);
+        if (t) t.ws.send(JSON.stringify({ type: "offer", from: id, payload }));
+        return;
+      }
+      if (type === "answer") {
+        // forward answer to target broadcaster
+        const t = conns.get(target);
+        if (t) t.ws.send(JSON.stringify({ type: "answer", from: id, payload }));
+        return;
+      }
+      if (type === "candidate") {
+        // forward candidate to target
+        const t = conns.get(target);
+        if (t) t.ws.send(JSON.stringify({ type: "candidate", from: id, payload }));
+        return;
+      }
+
+      // control messages broadcasting to broadcaster(s)
+      if (type === "broadcast-control") {
+        for (const c of conns.values()) if (c.role === "listener") c.ws.send(JSON.stringify({ type: "control", payload }));
+        return;
+      }
+    } catch (err) {
+      console.error("msg parse error", err);
+    }
+  };
+
+  socket.onclose = () => {
+    conns.delete(id);
+    console.log("conn close", id);
+    // If a listener left, notify broadcasters of disconnect (optional)
+    for (const c of conns.values()) {
+      if (c.role === "broadcaster") {
+        c.ws.send(JSON.stringify({ type: "peer-left", id }));
+      }
+    }
+  };
+
+  return response;
 }, { port: 8000 });
