@@ -2,15 +2,12 @@
 import { serve } from "https://deno.land/std@0.224.0/http/server.ts";
 
 interface Conn { id: string; ws: WebSocket; role?: 'broadcaster'|'listener'; }
-
 const conns = new Map<string, Conn>();
-let currentTime = 0;
-let songTitle = "";
+let lastOffer: any = null; // 🆕 store latest broadcaster offer
 
-console.log("✅ Public FM Signaling Server :8000");
+console.log("🚀 FastConnect FM server on :8000");
 
 serve((req) => {
-  // --- Allow CORS ---
   if (req.method === "OPTIONS") {
     return new Response("ok", {
       headers: {
@@ -22,7 +19,7 @@ serve((req) => {
   }
 
   if (req.headers.get("upgrade")?.toLowerCase() !== "websocket") {
-    return new Response("FM Server Active ok", {
+    return new Response("FM WebRTC signaling server", {
       headers: { "Access-Control-Allow-Origin": "*" },
     });
   }
@@ -31,7 +28,6 @@ serve((req) => {
   const id = crypto.randomUUID();
   const conn: Conn = { id, ws: socket };
   conns.set(id, conn);
-  console.log("🟢 Connected:", id);
 
   socket.onmessage = (e) => {
     if (typeof e.data !== "string") return;
@@ -39,55 +35,40 @@ serve((req) => {
 
     if (msg.type === "register") {
       conn.role = msg.role;
-      console.log(`Registered ${id} as ${msg.role}`);
-      // When new listener joins, tell broadcaster
-      if (msg.role === "listener") {
-        for (const c of conns.values())
-          if (c.role === "broadcaster")
-            c.ws.send(JSON.stringify({ type: "listener-joined", id }));
-        // also send sync info
-        socket.send(JSON.stringify({ type: "sync", time: currentTime, title: songTitle }));
+      if (conn.role === "listener") {
+        console.log("👂 new listener", id);
+        // 🟢 send latest offer instantly if available
+        if (lastOffer) {
+          conn.ws.send(JSON.stringify({ type: "offer", from: lastOffer.from, payload: lastOffer.payload }));
+        }
       }
       return;
     }
 
-    // ---- Sync from broadcaster ----
-    if (msg.type === "time") {
-      currentTime = msg.time;
+    // 🛰️ save latest offer
+    if (msg.type === "offer") {
+      lastOffer = { from: id, payload: msg.payload };
+      // broadcast offer to all listeners instantly
+      for (const c of conns.values()) {
+        if (c.role === "listener") {
+          c.ws.send(JSON.stringify({ type: "offer", from: id, payload: msg.payload }));
+        }
+      }
       return;
     }
 
-    if (msg.type === "title") {
-      songTitle = msg.title;
-      for (const c of conns.values())
-        if (c.role === "listener")
-          c.ws.send(JSON.stringify({ type: "title", title: songTitle }));
+    if (msg.type === "answer") {
+      const t = conns.get(msg.target);
+      if (t) t.ws.send(JSON.stringify({ type: "answer", from: id, payload: msg.payload }));
       return;
     }
 
-    // ---- WebRTC forwarding ----
-    const { type, target, payload } = msg;
-    if (type === "offer") {
-      const t = conns.get(target);
-      if (t) t.ws.send(JSON.stringify({ type: "offer", from: id, payload }));
-    }
-    if (type === "answer") {
-      const t = conns.get(target);
-      if (t) t.ws.send(JSON.stringify({ type: "answer", from: id, payload }));
-    }
-    if (type === "candidate") {
-      const t = conns.get(target);
-      if (t) t.ws.send(JSON.stringify({ type: "candidate", from: id, payload }));
+    if (msg.type === "candidate") {
+      const t = conns.get(msg.target);
+      if (t) t.ws.send(JSON.stringify({ type: "candidate", from: id, payload: msg.payload }));
     }
   };
 
-  socket.onclose = () => {
-    conns.delete(id);
-    console.log("🔴 Disconnected:", id);
-    for (const c of conns.values())
-      if (c.role === "broadcaster")
-        c.ws.send(JSON.stringify({ type: "peer-left", id }));
-  };
-
+  socket.onclose = () => conns.delete(id);
   return response;
 }, { port: 8000 });
