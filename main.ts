@@ -1,5 +1,7 @@
-// === Ultra Fast Live FM Signaling Server ===
-// Run: deno run --allow-net main.ts
+// === Ultra-Light Deno Signaling Server ===
+// Handles 1 broadcaster + unlimited listeners with ~0 load
+// Run locally: deno run --allow-net main.ts
+// Or deploy: https://dash.deno.com
 
 import { serve } from "https://deno.land/std@0.224.0/http/server.ts";
 
@@ -7,15 +9,14 @@ interface Conn {
   id: string;
   ws: WebSocket;
   role?: "broadcaster" | "listener";
-  ready?: boolean;
+  lastPing: number;
 }
 
 const conns = new Map<string, Conn>();
-
-console.log("🚀 Live FM Server started (instant connect mode)");
+console.log("✅ Optimized Live FM Signaling Server on :8000");
 
 serve((req) => {
-  // --- CORS support
+  // --- CORS for all HTTP requests
   if (req.method === "OPTIONS") {
     return new Response("ok", {
       headers: {
@@ -26,90 +27,87 @@ serve((req) => {
     });
   }
 
-  // --- WebSocket upgrade
-  if (req.headers.get("upgrade")?.toLowerCase() !== "websocket") {
-    return new Response("WebSocket signaling server", {
+  // --- If not a websocket, just info
+  if ((req.headers.get("upgrade") || "").toLowerCase() !== "websocket") {
+    return new Response("WebSocket signaling server running", {
       headers: { "Access-Control-Allow-Origin": "*" },
     });
   }
 
+  // --- Upgrade to WebSocket
   const { socket, response } = Deno.upgradeWebSocket(req);
   const id = crypto.randomUUID();
-  const conn: Conn = { id, ws: socket };
+  const conn: Conn = { id, ws: socket, lastPing: Date.now() };
   conns.set(id, conn);
+
   console.log("🟢 Connected:", id);
 
-  // --- Message handler
   socket.onmessage = (e) => {
     try {
       if (typeof e.data !== "string") return;
       const msg = JSON.parse(e.data);
-      const { type, role, target, payload } = msg;
 
-      // 1️⃣ Register roles
-      if (type === "register") {
-        conn.role = role;
-        conn.ready = true;
-        console.log(`📡 ${id} registered as ${role}`);
+      // --- Register broadcaster / listener
+      if (msg.type === "register") {
+        conn.role = msg.role;
+        conn.lastPing = Date.now();
+        console.log(`Registered ${id} as ${conn.role}`);
 
-        // Immediately tell everyone the new user is ready
-        if (role === "listener") {
-          for (const c of conns.values()) {
-            if (c.role === "broadcaster") {
+        if (conn.role === "listener") {
+          // Notify all broadcasters that new listener joined
+          for (const c of conns.values())
+            if (c.role === "broadcaster")
               c.ws.send(JSON.stringify({ type: "listener-joined", id }));
-            }
-          }
-        } else if (role === "broadcaster") {
-          // Let all waiting listeners know broadcaster is here
-          for (const c of conns.values()) {
-            if (c.role === "listener") {
-              c.ws.send(JSON.stringify({ type: "broadcaster-ready" }));
-            }
-          }
         }
         return;
       }
 
-      // 2️⃣ Handle WebRTC exchange
-      if (["offer", "answer", "candidate"].includes(type)) {
+      // --- WebRTC message relay
+      const { type, target, payload } = msg;
+
+      if (type === "offer" || type === "answer" || type === "candidate") {
         const t = conns.get(target);
-        if (t) {
-          t.ws.send(JSON.stringify({ type, from: id, payload }));
-        }
+        if (t) t.ws.send(JSON.stringify({ type, from: id, payload }));
         return;
       }
 
-      // 3️⃣ Broadcast control (optional)
+      // --- Broadcast control message from broadcaster → all listeners
       if (type === "broadcast-control") {
-        for (const c of conns.values()) {
-          if (c.role === "listener") {
+        for (const c of conns.values())
+          if (c.role === "listener")
             c.ws.send(JSON.stringify({ type: "control", payload }));
-          }
-        }
         return;
       }
 
-      // 4️⃣ Ping/pong keepalive
+      // --- Optional: heartbeat ping from client
       if (type === "ping") {
-        conn.ws.send(JSON.stringify({ type: "pong" }));
+        conn.lastPing = Date.now();
+        socket.send(JSON.stringify({ type: "pong" }));
       }
-    } catch (err) {
-      console.error("❌ Message error:", err);
+    } catch (_) {
+      // Ignore malformed messages silently (keeps CPU low)
     }
   };
 
-  // --- Connection closed
   socket.onclose = () => {
     conns.delete(id);
     console.log("🔴 Disconnected:", id);
-
-    // Notify broadcaster that listener left
-    for (const c of conns.values()) {
-      if (c.role === "broadcaster") {
+    for (const c of conns.values())
+      if (c.role === "broadcaster")
         c.ws.send(JSON.stringify({ type: "peer-left", id }));
-      }
-    }
   };
 
   return response;
 }, { port: 8000 });
+
+// --- Lightweight keep-alive cleanup (runs every 30 seconds)
+setInterval(() => {
+  const now = Date.now();
+  for (const [id, c] of conns) {
+    if (now - c.lastPing > 60000) {
+      try { c.ws.close(); } catch {}
+      conns.delete(id);
+      console.log("⏱️ Auto-cleaned idle:", id);
+    }
+  }
+}, 30000);
