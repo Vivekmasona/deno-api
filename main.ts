@@ -1,39 +1,27 @@
-// === vfy-call.deno.dev (Deno WebSocket Signaling Server) ===
+// === Global Auto FM Server ===
+// Run on Deno Deploy or local Deno: deno run --allow-net main.ts
 import { serve } from "https://deno.land/std@0.224.0/http/server.ts";
 
-const rooms = new Map<string, WebSocket[]>();
+const clients = new Set<WebSocket>();
 
 serve((req) => {
   if (req.headers.get("upgrade") !== "websocket") {
-    return new Response("RTC Signaling Active", {
+    return new Response("Global FM server active", {
       headers: { "Access-Control-Allow-Origin": "*" },
     });
   }
 
   const { socket, response } = Deno.upgradeWebSocket(req);
-  let roomId = "";
+  clients.add(socket);
 
   socket.onmessage = (e) => {
-    const msg = JSON.parse(e.data);
-    roomId = msg.room;
-
-    if (!rooms.has(roomId)) rooms.set(roomId, []);
-    const members = rooms.get(roomId)!;
-
-    // store socket if not already
-    if (!members.includes(socket)) members.push(socket);
-
-    // broadcast to others in same room
-    for (const peer of members) {
-      if (peer !== socket) peer.send(JSON.stringify(msg));
+    // forward same message to everyone else
+    for (const c of clients) {
+      if (c !== socket) c.send(e.data);
     }
   };
 
-  socket.onclose = () => {
-    if (roomId && rooms.has(roomId)) {
-      rooms.set(roomId, rooms.get(roomId)!.filter((s) => s !== socket));
-    }
-  };
+  socket.onclose = () => clients.delete(socket);
 
   return response;
 });
