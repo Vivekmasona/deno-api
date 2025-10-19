@@ -12,7 +12,7 @@ console.log("✅ Public FM Signaling Server :8000");
 serve((req) => {
   // --- Allow CORS ---
   if (req.method === "OPTIONS") {
-    return new Response("okay", {
+    return new Response("ok", {
       headers: {
         "Access-Control-Allow-Origin": "*",
         "Access-Control-Allow-Methods": "GET, POST, OPTIONS",
@@ -22,7 +22,7 @@ serve((req) => {
   }
 
   if (req.headers.get("upgrade")?.toLowerCase() !== "websocket") {
-    return new Response("FM Server Active", {
+    return new Response("FM Server Active ok", {
       headers: { "Access-Control-Allow-Origin": "*" },
     });
   }
