@@ -1,12 +1,22 @@
-// === Deno Binary Audio Broadcast Server ===
+// === Deno Binary Audio Broadcast Server (CORS fixed) ===
 import { serve } from "https://deno.land/std@0.224.0/http/server.ts";
 
 let broadcaster: WebSocket | null = null;
 const listeners = new Set<WebSocket>();
 
-console.log("🎧 Binary FM Server running on :8080");
+console.log("🎧 Binary FM Server running...");
 
 serve((req) => {
+  if (req.method === "OPTIONS") {
+    return new Response("ok", {
+      headers: {
+        "Access-Control-Allow-Origin": "*",
+        "Access-Control-Allow-Headers": "*",
+        "Access-Control-Allow-Methods": "GET, POST, OPTIONS",
+      },
+    });
+  }
+
   const { searchParams } = new URL(req.url);
   const role = searchParams.get("role");
   const { socket, response } = Deno.upgradeWebSocket(req);
@@ -24,10 +34,10 @@ serve((req) => {
   };
 
   socket.onmessage = (e) => {
-    if (role === "broadcaster") {
-      // binary chunk
-      for (const client of listeners) {
-        try { client.send(e.data); } catch {}
+    // Broadcast binary data directly
+    if (role === "broadcaster" && e.data instanceof Uint8Array || e.data instanceof ArrayBuffer) {
+      for (const l of listeners) {
+        try { l.send(e.data); } catch {}
       }
     }
   };
@@ -43,4 +53,4 @@ serve((req) => {
       "Access-Control-Allow-Headers": "*",
     },
   });
-}, { port: 8080 });
+});
