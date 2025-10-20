@@ -1,54 +1,32 @@
 import { serve } from "https://deno.land/std@0.224.0/http/server.ts";
 
-const rooms = new Map<string, WebSocket[]>();
+const rooms = new Map<string, Set<WebSocket>>();
 
-console.log("🚀 P2P Signaling Server ready on Deno");
+console.log("📡 Local P2P Signaling Server running...");
 
-serve((req) => {
+serve({ port: 8080 }, (req) => {
   const url = new URL(req.url);
   const room = url.searchParams.get("room") ?? "";
   const upgrade = req.headers.get("upgrade") || "";
 
-  // ✅ CORS allow
-  const corsHeaders = {
+  const cors = {
     "Access-Control-Allow-Origin": "*",
-    "Access-Control-Allow-Headers": "*",
     "Access-Control-Allow-Methods": "GET, POST, OPTIONS",
+    "Access-Control-Allow-Headers": "*",
   };
-
-  if (req.method === "OPTIONS") return new Response(null, { status: 204, headers: corsHeaders });
-
-  if (upgrade.toLowerCase() !== "websocket") {
-    return new Response("✅ Signaling Server Running", { headers: corsHeaders });
-  }
+  if (req.method === "OPTIONS") return new Response(null, { status: 204, headers: cors });
+  if (upgrade.toLowerCase() !== "websocket") return new Response("OK", { headers: cors });
 
   const { socket, response } = Deno.upgradeWebSocket(req);
-
-  socket.onopen = () => {
-    if (!room) return;
-    if (!rooms.has(room)) rooms.set(room, []);
-    rooms.get(room)!.push(socket);
-    console.log("🔗 New client joined room:", room);
-  };
+  if (!rooms.has(room)) rooms.set(room, new Set());
+  rooms.get(room)!.add(socket);
 
   socket.onmessage = (e) => {
-    if (!room) return;
-    const peers = rooms.get(room) || [];
-    for (const peer of peers) {
-      if (peer !== socket && peer.readyState === WebSocket.OPEN) {
-        peer.send(e.data);
-      }
-    }
+    for (const peer of rooms.get(room) ?? [])
+      if (peer !== socket && peer.readyState === WebSocket.OPEN) peer.send(e.data);
   };
 
-  socket.onclose = () => {
-    if (room && rooms.has(room)) {
-      const arr = rooms.get(room)!.filter((p) => p !== socket);
-      arr.length ? rooms.set(room, arr) : rooms.delete(room);
-    }
-  };
-
-  socket.onerror = (e) => console.error("⚠️ WS error:", e);
-
+  socket.onclose = () => rooms.get(room)?.delete(socket);
+  socket.onerror = (e) => console.error("WS error:", e);
   return response;
 });
