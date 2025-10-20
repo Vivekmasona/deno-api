@@ -1,109 +1,98 @@
 // server.ts
-// Run: deno run --allow-net --allow-read server.ts
+// Run with: deno run --allow-net --allow-read server.ts
 import { serve } from "https://deno.land/std@0.224.0/http/server.ts";
 import { contentType } from "https://deno.land/std@0.224.0/media_types/mod.ts";
 
-type Client = { id: string; ws: WebSocket; room?: string };
-const rooms = new Map<string, Set<Client>>();
+type Room = { sockets: WebSocket[] };
+const rooms = new Map<string, Room>();
 
-const ALLOWED_ORIGINS = ["*"]; // change to specific origin(s) if you want to restrict
+const PORT = Number(Deno.env.get("PORT") || 8080);
 
-console.log("🚀 Signaling + Static server starting on :8080");
+console.log(`🚀 Signaling + Static server starting on :${PORT}`);
 
 serve(async (req) => {
-  const url = new URL(req.url);
-  const pathname = url.pathname;
+  try {
+    const url = new URL(req.url);
+    const pathname = url.pathname;
 
-  // CORS helper
-  const corsHeaders = (extra: Record<string,string> = {}) => {
-    const origin = req.headers.get("origin") || "*";
-    const allowOrigin = ALLOWED_ORIGINS.includes("*") ? "*" :
-      (ALLOWED_ORIGINS.includes(origin) ? origin : "null");
-    return {
-      "Access-Control-Allow-Origin": allowOrigin,
-      "Access-Control-Allow-Methods": "GET, POST, OPTIONS",
-      "Access-Control-Allow-Headers": "Content-Type",
-      "Access-Control-Max-Age": "86400",
-      ...extra
-    };
-  };
-
-  // Preflight
-  if (req.method === "OPTIONS") {
-    return new Response(null, { status: 204, headers: corsHeaders() });
-  }
-
-  // Serve static files from current directory (index.html, bundle.js etc.)
-  // If not found, fall through to 404
-  if (req.method === "GET" && (pathname === "/" || pathname.endsWith(".html") || pathname.endsWith(".js") || pathname.endsWith(".css") || pathname.endsWith(".png") || pathname.endsWith(".webmanifest"))) {
-    try {
-      const path = pathname === "/" ? "./index.html" : "." + pathname;
-      const data = await Deno.readFile(path);
-      const ct = contentType(path) || "application/octet-stream";
-      return new Response(data, { status: 200, headers: corsHeaders({ "Content-Type": ct }) });
-    } catch (e) {
-      return new Response("Not found", { status: 404, headers: corsHeaders() });
-    }
-  }
-
-  // WebSocket upgrade path: /ws?room=ROOM
-  if (pathname === "/ws") {
-    // optional origin check
-    const origin = req.headers.get("origin") || "";
-    if (ALLOWED_ORIGINS.length > 0 && !ALLOWED_ORIGINS.includes("*")) {
-      if (!ALLOWED_ORIGINS.includes(origin)) {
-        return new Response("Forbidden origin", { status: 403, headers: corsHeaders() });
-      }
+    // Handle CORS preflight
+    if (req.method === "OPTIONS") {
+      return new Response(null, {
+        status: 204,
+        headers: {
+          "Access-Control-Allow-Origin": "*",
+          "Access-Control-Allow-Methods": "GET, POST, OPTIONS",
+          "Access-Control-Allow-Headers": "*",
+          "Access-Control-Max-Age": "86400",
+        },
+      });
     }
 
-    const { socket, response } = Deno.upgradeWebSocket(req);
-    const client: Client = { id: crypto.randomUUID(), ws: socket };
+    // If WebSocket upgrade requested at /ws -> upgrade
+    if (pathname === "/ws") {
+      const { socket, response } = Deno.upgradeWebSocket(req);
+      const params = url.searchParams;
+      const roomId = params.get("room") || "default";
 
-    socket.onopen = () => {
-      const room = url.searchParams.get("room") || "default";
-      client.room = room;
-      if (!rooms.has(room)) rooms.set(room, new Set());
-      rooms.get(room)!.add(client);
-      console.log(`WS open: ${client.id} room=${room} (members=${rooms.get(room)!.size})`);
-      // Optionally send joined info
-      const others = Array.from(rooms.get(room)!).filter(c => c.id !== client.id).map(c => c.id);
-      socket.send(JSON.stringify({ type: "joined", id: client.id, peers: others }));
-    };
+      socket.onopen = () => {
+        console.log("WS open, room=", roomId);
+        if (!rooms.has(roomId)) rooms.set(roomId, { sockets: [] });
+        rooms.get(roomId)!.sockets.push(socket);
+      };
 
-    socket.onmessage = (ev) => {
-      try {
-        const room = client.room!;
-        if (!room) return;
-        const set = rooms.get(room);
-        if (!set) return;
-        // Relay message to all other peers in same room
-        for (const c of set) {
-          if (c !== client && c.ws.readyState === WebSocket.OPEN) {
-            c.ws.send(ev.data);
+      socket.onmessage = (ev) => {
+        // Relay to other peers in the same room
+        try {
+          const room = rooms.get(roomId);
+          if (!room) return;
+          for (const s of room.sockets) {
+            if (s !== socket && s.readyState === WebSocket.OPEN) {
+              s.send(ev.data);
+            }
           }
+        } catch (err) {
+          console.error("relay error:", err);
         }
-      } catch (err) {
-        console.error("ws msg error", err);
-      }
-    };
+      };
 
-    socket.onclose = () => {
-      const room = client.room;
-      if (room && rooms.has(room)) {
-        const set = rooms.get(room)!;
-        set.delete(client);
-        if (set.size === 0) rooms.delete(room);
-      }
-      console.log(`WS close: ${client.id} room=${room}`);
-    };
+      socket.onclose = () => {
+        console.log("WS close, room=", roomId);
+        const room = rooms.get(roomId);
+        if (!room) return;
+        room.sockets = room.sockets.filter(s => s !== socket);
+        if (room.sockets.length === 0) rooms.delete(roomId);
+      };
 
-    socket.onerror = (err) => {
-      console.error("WS error:", err);
-    };
+      socket.onerror = (e) => console.error("WS error:", e);
+      // Return the upgrade response (cannot attach CORS headers reliably here)
+      return response;
+    }
 
-    return response;
+    // Serve static files from current directory (index.html, js, css)
+    // Default to index.html for '/'
+    let filePath = "." + pathname;
+    if (pathname === "/") filePath = "./index.html";
+
+    try {
+      const data = await Deno.readFile(filePath);
+      const ct = contentType(filePath) || "application/octet-stream";
+      const headers = new Headers({
+        "Content-Type": ct,
+        "Access-Control-Allow-Origin": "*",
+      });
+      return new Response(data, { status: 200, headers });
+    } catch (err) {
+      // Not found
+      return new Response("Not found", {
+        status: 404,
+        headers: {
+          "Content-Type": "text/plain",
+          "Access-Control-Allow-Origin": "*",
+        },
+      });
+    }
+  } catch (e) {
+    console.error("server error", e);
+    return new Response("Internal server error", { status: 500 });
   }
-
-  // Fallback - not found
-  return new Response("Not found", { status: 404, headers: corsHeaders() });
-}, { addr: ":8080" });
+}, { addr: `:${PORT}` });
