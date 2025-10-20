@@ -4,53 +4,63 @@ import { serve } from "https://deno.land/std@0.224.0/http/server.ts";
 interface Client {
   id: string;
   ws: WebSocket;
-  room: string;
+  role?: "broadcaster" | "listener";
 }
 
-const rooms = new Map<string, Set<Client>>();
-console.log("🚀 vfy-call Signaling Server started");
+const clients = new Map<string, Client>();
+let currentMeta: any = null; // song info + currentTime
 
-serve(async (req) => {
-  const upgrade = req.headers.get("upgrade") || "";
-  const url = new URL(req.url);
-  const room = url.searchParams.get("room") || "default";
-  const clientId = crypto.randomUUID();
+console.log("🎧 Fast FM Server started...");
 
-  // ✅ Handle CORS (for any browser)
-  const cors = {
-    "Access-Control-Allow-Origin": "*",
-    "Access-Control-Allow-Methods": "GET, POST, OPTIONS",
-    "Access-Control-Allow-Headers": "*",
-  };
-  if (req.method === "OPTIONS") return new Response(null, { status: 204, headers: cors });
-
-  // ✅ Health check
-  if (upgrade.toLowerCase() !== "websocket") {
-    return new Response(`✅ vfy-call signaling active: room=${room}`, { headers: cors });
+serve((req) => {
+  if (req.headers.get("upgrade") !== "websocket") {
+    return new Response("FM server online", {
+      headers: { "Access-Control-Allow-Origin": "*" },
+    });
   }
 
-  // ✅ WebSocket upgrade
   const { socket, response } = Deno.upgradeWebSocket(req);
-  const client: Client = { id: clientId, ws: socket, room };
-
-  if (!rooms.has(room)) rooms.set(room, new Set());
-  rooms.get(room)!.add(client);
-
-  console.log(`👤 Joined: ${clientId} in room ${room}`);
+  const id = crypto.randomUUID();
+  const client: Client = { id, ws: socket };
+  clients.set(id, client);
 
   socket.onmessage = (e) => {
-    for (const c of rooms.get(room) || []) {
-      if (c.id !== clientId && c.ws.readyState === WebSocket.OPEN) {
-        c.ws.send(e.data);
-      }
+    if (typeof e.data !== "string") return;
+    const msg = JSON.parse(e.data);
+
+    switch (msg.type) {
+      case "register":
+        client.role = msg.role;
+        console.log(`🧩 ${msg.role} joined: ${id}`);
+        if (msg.role === "listener" && currentMeta) {
+          // Send latest song info and time
+          socket.send(JSON.stringify({ type: "meta", ...currentMeta }));
+        }
+        break;
+
+      case "offer":
+        for (const c of clients.values())
+          if (c.role === "listener") c.ws.send(JSON.stringify(msg));
+        break;
+
+      case "answer":
+        for (const c of clients.values())
+          if (c.role === "broadcaster") c.ws.send(JSON.stringify(msg));
+        break;
+
+      case "candidate":
+        for (const c of clients.values())
+          if (c !== client) c.ws.send(JSON.stringify(msg));
+        break;
+
+      case "meta": // title + currentTime update
+        currentMeta = msg;
+        for (const c of clients.values())
+          if (c.role === "listener") c.ws.send(JSON.stringify(msg));
+        break;
     }
   };
 
-  socket.onclose = () => {
-    rooms.get(room)?.delete(client);
-    console.log(`❌ Disconnected: ${clientId}`);
-  };
-
-  socket.onerror = (err) => console.error("⚠️ WS error:", err);
+  socket.onclose = () => clients.delete(id);
   return response;
-});
+}, { port: 8000 });
