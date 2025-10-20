@@ -1,66 +1,101 @@
-// server.ts
-import { serve } from "https://deno.land/std@0.224.0/http/server.ts";
+// main.ts
+import { serve } from "https://deno.land/std/http/server.ts";
 
-interface Client {
-  id: string;
-  ws: WebSocket;
-  role?: "broadcaster" | "listener";
+// Map of all connected clients
+const clients = new Map<string, { ws: WebSocket; role?: string }>();
+
+// Helper: Safe send to any socket
+function safeSend(ws: WebSocket, data: unknown) {
+  try {
+    if (ws.readyState === WebSocket.OPEN) ws.send(JSON.stringify(data));
+  } catch (_) {
+    // ignore send errors
+  }
 }
 
-const clients = new Map<string, Client>();
-let currentMeta: any = null; // song info + currentTime
+// Generate UUID (Deno has built-in crypto)
+function uid() {
+  return crypto.randomUUID();
+}
 
-console.log("🎧 Fast FM Server started...");
+console.log("🎧 FM Deno Signaling Server Ready");
 
 serve((req) => {
+  // Handle non-WebSocket requests (CORS preflight + info)
   if (req.headers.get("upgrade") !== "websocket") {
-    return new Response("FM server online", {
-      headers: { "Access-Control-Allow-Origin": "*" },
+    const headers = new Headers({
+      "Access-Control-Allow-Origin": "*",
+      "Access-Control-Allow-Methods": "GET, POST, OPTIONS",
+      "Access-Control-Allow-Headers": "Content-Type",
+    });
+
+    if (req.method === "OPTIONS") {
+      return new Response(null, { headers });
+    }
+
+    return new Response("🎧 Deno FM WebRTC Signaling Server Live!", {
+      headers,
     });
   }
 
-  const { socket, response } = Deno.upgradeWebSocket(req);
-  const id = crypto.randomUUID();
-  const client: Client = { id, ws: socket };
-  clients.set(id, client);
+  // Upgrade HTTP to WebSocket
+  const { socket, response } = Deno.upgradeWebSocket(req, { idleTimeout: 120 });
 
+  const id = uid();
+  clients.set(id, { ws: socket });
+  console.log("🔗 Connected:", id);
+
+  // Send ack
+  safeSend(socket, { type: "connected", id });
+
+  // Handle messages
   socket.onmessage = (e) => {
-    if (typeof e.data !== "string") return;
-    const msg = JSON.parse(e.data);
+    try {
+      const msg = JSON.parse(e.data);
+      const { type, role, target, payload } = msg;
 
-    switch (msg.type) {
-      case "register":
-        client.role = msg.role;
-        console.log(`🧩 ${msg.role} joined: ${id}`);
-        if (msg.role === "listener" && currentMeta) {
-          // Send latest song info and time
-          socket.send(JSON.stringify({ type: "meta", ...currentMeta }));
+      // Register role
+      if (type === "register") {
+        clients.get(id)!.role = role;
+        console.log(`🧩 ${id} registered as ${role}`);
+
+        // Notify broadcaster about listener join
+        if (role === "listener") {
+          for (const [, c] of clients)
+            if (c.role === "broadcaster")
+              safeSend(c.ws, { type: "listener-joined", id });
         }
-        break;
+      }
 
-      case "offer":
-        for (const c of clients.values())
-          if (c.role === "listener") c.ws.send(JSON.stringify(msg));
-        break;
-
-      case "answer":
-        for (const c of clients.values())
-          if (c.role === "broadcaster") c.ws.send(JSON.stringify(msg));
-        break;
-
-      case "candidate":
-        for (const c of clients.values())
-          if (c !== client) c.ws.send(JSON.stringify(msg));
-        break;
-
-      case "meta": // title + currentTime update
-        currentMeta = msg;
-        for (const c of clients.values())
-          if (c.role === "listener") c.ws.send(JSON.stringify(msg));
-        break;
+      // Relay offer/answer/candidate
+      if (["offer", "answer", "candidate"].includes(type) && target) {
+        const t = clients.get(target);
+        if (t) safeSend(t.ws, { type, from: id, payload });
+      }
+    } catch (err) {
+      console.error("⚠️ Parse error:", err);
     }
   };
 
-  socket.onclose = () => clients.delete(id);
+  // Handle close
+  socket.onclose = () => {
+    clients.delete(id);
+    console.log("❌ Disconnected:", id);
+
+    // Notify broadcaster if listener left
+    for (const [, c] of clients)
+      if (c.role === "broadcaster")
+        safeSend(c.ws, { type: "peer-left", id });
+  };
+
+  // Handle error safely
+  socket.onerror = (err) => {
+    console.error("💥 Socket error:", err);
+    try {
+      socket.close();
+    } catch (_) {}
+    clients.delete(id);
+  };
+
   return response;
-}, { port: 8000 });
+});
