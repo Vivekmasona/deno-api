@@ -1,66 +1,54 @@
 import { serve } from "https://deno.land/std@0.224.0/http/server.ts";
 
-interface RoomMap {
-  [key: string]: WebSocket[];
-}
+const rooms = new Map<string, WebSocket[]>();
 
-const rooms: RoomMap = {};
-
-console.log("🚀 Signaling Server started on Deno...");
+console.log("🚀 P2P Signaling Server ready on Deno");
 
 serve((req) => {
-  const { searchParams } = new URL(req.url);
-  const room = searchParams.get("room");
+  const url = new URL(req.url);
+  const room = url.searchParams.get("room") ?? "";
   const upgrade = req.headers.get("upgrade") || "";
 
-  // ✅ CORS fix
+  // ✅ CORS allow
   const corsHeaders = {
     "Access-Control-Allow-Origin": "*",
-    "Access-Control-Allow-Methods": "GET, POST, OPTIONS",
     "Access-Control-Allow-Headers": "*",
+    "Access-Control-Allow-Methods": "GET, POST, OPTIONS",
   };
 
-  // ✅ Handle OPTIONS preflight
-  if (req.method === "OPTIONS") {
-    return new Response(null, { status: 204, headers: corsHeaders });
-  }
+  if (req.method === "OPTIONS") return new Response(null, { status: 204, headers: corsHeaders });
 
-  // ✅ Normal request (for testing)
   if (upgrade.toLowerCase() !== "websocket") {
-    return new Response("✅ Deno WebRTC Signaling Server running!", {
-      headers: corsHeaders,
-    });
+    return new Response("✅ Signaling Server Running", { headers: corsHeaders });
   }
 
-  // ✅ WebSocket upgrade
   const { socket, response } = Deno.upgradeWebSocket(req);
 
   socket.onopen = () => {
-    console.log("🔗 Client joined:", room);
     if (!room) return;
-    rooms[room] ??= [];
-    rooms[room].push(socket);
+    if (!rooms.has(room)) rooms.set(room, []);
+    rooms.get(room)!.push(socket);
+    console.log("🔗 New client joined room:", room);
   };
 
-  socket.onmessage = (event) => {
+  socket.onmessage = (e) => {
     if (!room) return;
-    const peers = rooms[room] || [];
+    const peers = rooms.get(room) || [];
     for (const peer of peers) {
       if (peer !== socket && peer.readyState === WebSocket.OPEN) {
-        peer.send(event.data);
+        peer.send(e.data);
       }
     }
   };
 
   socket.onclose = () => {
-    if (room && rooms[room]) {
-      rooms[room] = rooms[room].filter((s) => s !== socket);
-      if (rooms[room].length === 0) delete rooms[room];
+    if (room && rooms.has(room)) {
+      const arr = rooms.get(room)!.filter((p) => p !== socket);
+      arr.length ? rooms.set(room, arr) : rooms.delete(room);
     }
-    console.log("❌ Disconnected:", room);
   };
 
-  socket.onerror = (err) => console.error("⚠️ WebSocket error:", err);
+  socket.onerror = (e) => console.error("⚠️ WS error:", e);
 
   return response;
 });
