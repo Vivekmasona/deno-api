@@ -1,70 +1,33 @@
+// deno_server.js
 import { serve } from "https://deno.land/std@0.224.0/http/server.ts";
 
-const listeners = new Set<WebSocket>();
-let host: WebSocket | null = null;
+const clients = new Set<WebSocket>();
 
-console.log("🎧 Bihar FM Deno WebSocket Stream Ready");
+function broadcast(data) {
+  for (const client of clients) {
+    try {
+      client.send(JSON.stringify(data));
+    } catch {}
+  }
+}
 
 serve((req) => {
   const { pathname } = new URL(req.url);
 
-  // Basic route info
-  if (pathname === "/") {
-    return new Response("🎙 Bihar FM Stream Server is Live!", {
-      headers: { "content-type": "text/plain" },
-    });
-  }
-
   // WebSocket upgrade
   if (pathname === "/ws") {
     const { socket, response } = Deno.upgradeWebSocket(req);
-    let role: "host" | "listener" | null = null;
-
+    socket.onopen = () => clients.add(socket);
+    socket.onclose = () => clients.delete(socket);
     socket.onmessage = (e) => {
-      // Host/Listener registration
-      if (typeof e.data === "string") {
-        try {
-          const msg = JSON.parse(e.data);
-          if (msg.type === "register") {
-            role = msg.role;
-            if (role === "host") {
-              host = socket;
-              console.log("🎙 Host connected");
-              // Inform listeners
-              for (const l of listeners)
-                l.send(JSON.stringify({ type: "status", msg: "Host live" }));
-            }
-            if (role === "listener") {
-              listeners.add(socket);
-              console.log(`🎧 Listener joined (${listeners.size})`);
-            }
-          }
-        } catch {}
-        return;
-      }
-
-      // If binary chunk from host, forward to listeners
-      if (role === "host" && e.data instanceof Uint8Array) {
-        for (const l of listeners) {
-          if (l.readyState === WebSocket.OPEN) l.send(e.data);
-        }
+      const msg = JSON.parse(e.data);
+      if (msg.type === "stream") {
+        // broadcast stream URL to all listeners
+        broadcast({ type: "play", url: msg.url });
       }
     };
-
-    socket.onclose = () => {
-      if (role === "host") {
-        console.log("⛔ Host disconnected");
-        host = null;
-        for (const l of listeners)
-          l.send(JSON.stringify({ type: "status", msg: "Host offline" }));
-      } else if (role === "listener") {
-        listeners.delete(socket);
-        console.log(`❌ Listener left (${listeners.size})`);
-      }
-    };
-
     return response;
   }
 
-  return new Response("Not Found", { status: 404 });
+  return new Response("🎧 BiharFM Deno Stream Server is live!", { status: 200 });
 });
