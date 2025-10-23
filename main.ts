@@ -1,10 +1,10 @@
-// deno_sync_radio_auto.js
+// deno_radio_sync_final.js
 import { serve } from "https://deno.land/std@0.224.0/http/server.ts";
 
 const clients = new Map(); // id -> { ws, role }
 const HOST = { id: null, ws: null };
 
-// Store host's current state
+// store last known song state
 let currentState = {
   url: null,
   time: 0,
@@ -12,16 +12,15 @@ let currentState = {
   lastUpdate: 0,
 };
 
-function broadcast(data) {
-  for (const [, c] of clients) {
-    if (c.role === "listener") {
-      try { c.ws.send(JSON.stringify(data)); } catch {}
-    }
-  }
+// send helper
+function send(ws, data) {
+  try { ws.send(JSON.stringify(data)); } catch {}
 }
 
-function sendTo(ws, data) {
-  try { ws.send(JSON.stringify(data)); } catch {}
+// broadcast to all listeners
+function broadcast(data) {
+  for (const [, c] of clients)
+    if (c.role === "listener") send(c.ws, data);
 }
 
 serve((req) => {
@@ -32,10 +31,10 @@ serve((req) => {
     const id = crypto.randomUUID();
     clients.set(id, { ws: socket, role: "unknown" });
 
-    socket.onmessage = async (e) => {
+    socket.onmessage = (e) => {
       const msg = JSON.parse(e.data);
 
-      // Register client
+      // Register role
       if (msg.type === "register") {
         clients.get(id).role = msg.role;
 
@@ -46,46 +45,40 @@ serve((req) => {
         }
 
         if (msg.role === "listener") {
-          console.log("👂 Listener joined");
+          console.log("👂 New listener joined");
 
-          // Send current host state if available
+          // Send host state only once (for new user sync)
           if (currentState.url) {
-            sendTo(socket, {
-              type: "control",
-              action: "load",
-              url: currentState.url,
-            });
-            // Calculate approximate current time (based on last update)
+            // calculate approximate position if playing
             const elapsed = (Date.now() - currentState.lastUpdate) / 1000;
-            const estimatedTime = currentState.time + (currentState.playing ? elapsed : 0);
-            sendTo(socket, {
-              type: "control",
-              action: "sync",
-              time: estimatedTime,
-            });
+            const pos = currentState.playing
+              ? currentState.time + elapsed
+              : currentState.time;
+
+            send(socket, { type: "control", action: "load", url: currentState.url });
+            send(socket, { type: "control", action: "sync", time: pos });
             if (currentState.playing)
-              sendTo(socket, { type: "control", action: "play" });
+              send(socket, { type: "control", action: "play" });
           }
 
-          // Notify host about listener count
+          // update listener count to host
           if (HOST.ws) {
             const count = [...clients.values()].filter(c => c.role === "listener").length;
-            sendTo(HOST.ws, { type: "count", count });
+            send(HOST.ws, { type: "count", count });
           }
-
-          // Status update
-          sendTo(socket, { type: "status", online: !!HOST.ws });
         }
       }
 
       // Host controls
       if (msg.type === "control" && id === HOST.id) {
-        // Update current state
+        // Update host state only for control events
         if (msg.action === "load") {
-          currentState.url = msg.url;
-          currentState.time = 0;
-          currentState.playing = true;
-          currentState.lastUpdate = Date.now();
+          currentState = {
+            url: msg.url,
+            time: 0,
+            playing: true,
+            lastUpdate: Date.now(),
+          };
         }
         if (msg.action === "play") {
           currentState.playing = true;
@@ -93,16 +86,15 @@ serve((req) => {
         }
         if (msg.action === "pause") {
           currentState.playing = false;
-          currentState.time = msg.time ?? currentState.time;
+          currentState.time = msg.time;
           currentState.lastUpdate = Date.now();
         }
-        if (msg.action === "sync") {
+        if (msg.action === "seek") {
           currentState.time = msg.time;
           currentState.lastUpdate = Date.now();
         }
 
-        // Broadcast to all listeners
-        broadcast(msg);
+        broadcast(msg); // send to all listeners
       }
     };
 
@@ -112,11 +104,11 @@ serve((req) => {
 
       if (role === "listener" && HOST.ws) {
         const count = [...clients.values()].filter(c => c.role === "listener").length;
-        sendTo(HOST.ws, { type: "count", count });
+        send(HOST.ws, { type: "count", count });
       }
 
       if (role === "host") {
-        console.log("❌ Host disconnected");
+        console.log("❌ Host left");
         HOST.id = null;
         HOST.ws = null;
         broadcast({ type: "status", online: false });
@@ -126,5 +118,5 @@ serve((req) => {
     return response;
   }
 
-  return new Response("🎧 BiharFM AutoSync Server Live");
+  return new Response("🎧 BiharFM Optimized AutoSync Server Running");
 });
