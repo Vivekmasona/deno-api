@@ -1,88 +1,69 @@
-import { serve } from "https://deno.land/std/http/server.ts";
+// === BiharFM Stream Server (Deno Deploy) ===
+// Single audio source → unlimited listeners
+// Author: Vivek Singh (BiharFM)
 
-const clients = new Map<string, { ws: WebSocket; role?: string }>();
-function safeSend(ws: WebSocket, data: unknown) {
-  try {
-    if (ws.readyState === WebSocket.OPEN) ws.send(JSON.stringify(data));
-  } catch (_) {}
-}
-function uid() {
-  return crypto.randomUUID();
+import { serve } from "https://deno.land/std@0.224.0/http/server.ts";
+
+// Simple in-memory buffer (RAM based circular buffer)
+let currentChunk: Uint8Array | null = null;
+
+// Optional metadata
+let meta = {
+  title: "BiharFM Live",
+  artist: "Unknown Artist",
+  cover: "",
+};
+
+// Helper
+function ok(text: string) {
+  return new Response(text, { headers: { "content-type": "text/plain" } });
 }
 
-console.log("🎧 FM Deno Signaling Server Ready");
+console.log("🚀 BiharFM Deno Stream Server is live...");
 
 serve(async (req) => {
-  const url = new URL(req.url);
+  const { pathname, searchParams } = new URL(req.url);
 
-  // ✅ Serve default mp3 at /listener.mp3
-  if (url.pathname === "/listener.mp3") {
-    const headers = new Headers({
-      "Content-Type": "audio/mpeg",
-      "Access-Control-Allow-Origin": "*",
-    });
-
-    // Either serve a local file OR fetch from remote CDN
-    // 1️⃣ Serve local file (if deployed with it)
+  // ✅ Upload audio chunks (broadcaster)
+  if (pathname === "/upload" && req.method === "POST") {
     try {
-      const file = await Deno.readFile("./listener.mp3");
-      return new Response(file, { headers });
-    } catch {
-      // 2️⃣ Or fallback to remote CDN URL
-      const resp = await fetch("https://cdn.example.com/default.mp3");
-      return new Response(await resp.arrayBuffer(), { headers });
+      const body = new Uint8Array(await req.arrayBuffer());
+      currentChunk = body;
+      if (searchParams.get("title")) {
+        meta = {
+          title: searchParams.get("title") || meta.title,
+          artist: searchParams.get("artist") || meta.artist,
+          cover: searchParams.get("cover") || meta.cover,
+        };
+      }
+      return ok("🎵 Chunk uploaded");
+    } catch (e) {
+      return new Response("Upload failed: " + e.message, { status: 500 });
     }
   }
 
-  // ✅ Handle WebSocket (same as before)
-  if (req.headers.get("upgrade") === "websocket") {
-    const { socket, response } = Deno.upgradeWebSocket(req, { idleTimeout: 120 });
-    const id = uid();
-    clients.set(id, { ws: socket });
-    console.log("🔗 Connected:", id);
-
-    safeSend(socket, { type: "connected", id });
-
-    socket.onmessage = (e) => {
-      try {
-        const msg = JSON.parse(e.data);
-        const { type, role, target, payload } = msg;
-        if (type === "register") {
-          clients.get(id)!.role = role;
-          console.log(`🧩 ${id} registered as ${role}`);
-          if (role === "listener") {
-            for (const [, c] of clients)
-              if (c.role === "broadcaster")
-                safeSend(c.ws, { type: "listener-joined", id });
-          }
-        }
-        if (["offer", "answer", "candidate"].includes(type) && target) {
-          const t = clients.get(target);
-          if (t) safeSend(t.ws, { type, from: id, payload });
-        }
-      } catch (err) {
-        console.error("⚠️ Parse error:", err);
-      }
-    };
-
-    socket.onclose = () => {
-      clients.delete(id);
-      console.log("❌ Disconnected:", id);
-      for (const [, c] of clients)
-        if (c.role === "broadcaster") safeSend(c.ws, { type: "peer-left", id });
-    };
-
-    socket.onerror = (err) => {
-      console.error("💥 Socket error:", err);
-      try { socket.close(); } catch (_) {}
-      clients.delete(id);
-    };
-
-    return response;
+  // ✅ Stream to listeners
+  if (pathname === "/listen") {
+    if (!currentChunk)
+      return new Response("No live stream yet.", { status: 404 });
+    const headers = new Headers({
+      "Content-Type": "audio/mpeg",
+      "Cache-Control": "no-cache",
+      "Access-Control-Allow-Origin": "*",
+    });
+    return new Response(currentChunk, { headers });
   }
 
-  // ✅ Default response for all other routes
-  return new Response("🎧 Deno FM WebRTC Signaling Server Live!", {
-    headers: { "Access-Control-Allow-Origin": "*" },
-  });
+  // ✅ Metadata endpoint
+  if (pathname === "/meta") {
+    return new Response(JSON.stringify(meta), {
+      headers: { "content-type": "application/json" },
+    });
+  }
+
+  // ✅ Root info
+  return ok("🎧 BiharFM Deno Stream Server Active!\n\n" +
+    "POST /upload  - broadcaster upload\n" +
+    "GET  /listen  - listeners stream audio\n" +
+    "GET  /meta    - get current title/artist");
 });
